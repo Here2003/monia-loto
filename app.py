@@ -7,8 +7,6 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import streamlit as st
-@@ -33,14 +33,13 @@
-
 
 def lire_table(nom, contenu):
     """Essaie plusieurs encodages et séparateurs pour lire CSV/TXT."""
