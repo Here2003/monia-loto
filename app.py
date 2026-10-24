@@ -8,6 +8,7 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 import requests
+from urllib.parse import urlparse
 import streamlit as st
 
 INSTRUCTIONS_NEREON = """
@@ -130,20 +131,52 @@ def tableau(donnees, hide_index=False):
 # Chargement des archives
 # --------------------------------------------------
 
+HOTES_AUTORISES = ("fdj.fr",)
+TAILLE_MAX_TELECHARGEMENT = 25 * 1024 * 1024
+TAILLE_MAX_DECOMPRESSEE = 150 * 1024 * 1024
+NB_MAX_FICHIERS_ZIP = 100
+
+
+def url_autorisee(url):
+    """Seules les adresses https de fdj.fr (et sous-domaines) sont permises."""
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    hote = (p.hostname or "").lower()
+    return p.scheme == "https" and any(
+        hote == h or hote.endswith("." + h) for h in HOTES_AUTORISES
+    )
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def telecharger_archive(url):
-    """Télécharge une archive publique et renvoie son contenu."""
-    reponse = requests.get(
+    """Télécharge une archive publique FDJ, avec garde-fous de sécurité."""
+    if not url_autorisee(url):
+        raise ValueError("Adresse refusée : seules les adresses fdj.fr sont autorisées.")
+
+    with requests.get(
         url,
         timeout=30,
         headers={"User-Agent": "MonIA-Nereon/1.0"},
-    )
-    reponse.raise_for_status()
+        stream=True,
+    ) as reponse:
+        reponse.raise_for_status()
 
-    if not reponse.content:
+        for etape in list(reponse.history) + [reponse]:
+            if not url_autorisee(etape.url):
+                raise ValueError("Redirection refusée vers un site non autorisé.")
+
+        contenu = bytearray()
+        for morceau in reponse.iter_content(chunk_size=65536):
+            contenu.extend(morceau)
+            if len(contenu) > TAILLE_MAX_TELECHARGEMENT:
+                raise ValueError("Fichier trop volumineux : téléchargement interrompu.")
+
+    if not contenu:
         raise ValueError("Le fichier téléchargé est vide.")
 
-    return reponse.content
+    return bytes(contenu)
 
 
 def lire_table(nom, contenu):
@@ -181,10 +214,16 @@ def lire_fichier(nom, contenu):
 
     if extension.endswith(".zip"):
         with zipfile.ZipFile(io.BytesIO(contenu)) as archive:
-            for nom_interne in archive.namelist():
+            infos = archive.infolist()
+            if len(infos) > NB_MAX_FICHIERS_ZIP:
+                raise ValueError("Archive refusée : trop de fichiers.")
+            if sum(i.file_size for i in infos) > TAILLE_MAX_DECOMPRESSEE:
+                raise ValueError("Archive refusée : taille décompressée excessive.")
+            for info in infos:
+                nom_interne = info.filename
                 if nom_interne.lower().endswith((".csv", ".txt")):
                     fichiers.extend(
-                        lire_table(nom_interne, archive.read(nom_interne))
+                        lire_table(nom_interne, archive.read(info))
                     )
     elif extension.endswith((".csv", ".txt")):
         fichiers = lire_table(nom, contenu)
@@ -196,6 +235,7 @@ def lire_fichier(nom, contenu):
     return fichiers
 
 
+@st.cache_data(ttl=3600, show_spinner="Néréon télécharge les archives officielles FDJ…")
 def charger_archives_officielles(jeu):
     """Télécharge les archives FDJ du jeu choisi. Renvoie (tables, erreurs)."""
     tables_off, erreurs_off = [], []
@@ -217,39 +257,31 @@ with st.sidebar:
     jeu = st.radio("Jeu étudié", ["EuroMillions", "Loto"])
 
     fichiers = st.file_uploader(
-        "Importer les archives CSV ou ZIP",
+        "Importer ses propres archives (facultatif)",
         type=["csv", "txt", "zip"],
         accept_multiple_files=True,
-        help="Les fichiers sont analysés pendant cette session.",
+        help="Sans fichier importé, Néréon télécharge seul les archives "
+             "officielles de la FDJ.",
     )
-
-    st.write("**ou**")
-    if st.button("⬇️ Charger les archives officielles FDJ"):
-        with st.spinner("Téléchargement des archives FDJ…"):
-            t_off, e_off = charger_archives_officielles(jeu)
-        st.session_state["tables_officielles"] = t_off
-        st.session_state["erreurs_officielles"] = e_off
-        st.session_state["jeu_officiel"] = jeu
-
-    if st.session_state.get("tables_officielles"):
-        st.caption(
-            f"Archives FDJ chargées : {st.session_state['jeu_officiel']}."
-        )
-        if st.button("Retirer les archives FDJ"):
-            st.session_state.pop("tables_officielles", None)
-            st.session_state.pop("erreurs_officielles", None)
-            st.session_state.pop("jeu_officiel", None)
-            st.rerun()
+    if st.button("🔄 Recharger les archives FDJ"):
+        charger_archives_officielles.clear()
+        telecharger_archive.clear()
 
     st.caption(
-        "Les données importées ne sont pas enregistrées dans un "
-        "historique permanent par cette application."
+        "Sécurité : Néréon ne télécharge que depuis fdj.fr (https), limite "
+        "la taille des fichiers et des archives ZIP, et n'enregistre aucune "
+        "donnée de façon permanente."
+    )
+    st.caption(
+        "MonIA — outil d'analyse descriptive. Les résultats dépendent de la "
+        "qualité, de la couverture et du format des archives."
     )
 
-tables = []
-erreurs = list(st.session_state.get("erreurs_officielles", []))
+cle_num = f"colonnes_numeros_{jeu}"
+cle_bonus = f"colonnes_bonus_{jeu}"
 
-tables.extend(st.session_state.get("tables_officielles", []))
+tables = []
+erreurs = []
 
 if fichiers:
     for fichier in fichiers:
@@ -257,15 +289,20 @@ if fichiers:
             tables.extend(lire_fichier(fichier.name, fichier.getvalue()))
         except Exception as e:
             erreurs.append(f"{fichier.name} : {e}")
+else:
+    tables, erreurs_off = charger_archives_officielles(jeu)
+    erreurs.extend(erreurs_off)
+    if not tables:
+        charger_archives_officielles.clear()
 
 for erreur in erreurs:
     st.warning(erreur)
 
 if not tables:
     st.info(
-        "Importe une ou plusieurs archives (ou charge les archives "
-        "officielles FDJ dans la barre latérale) pour commencer. "
-        "Les onglets et les outils d'analyse sont prêts."
+        "Aucune archive disponible. Néréon n'a pas pu télécharger les "
+        "archives FDJ : importe un fichier CSV/ZIP ou clique sur "
+        "« Recharger »."
     )
 
 # --------------------------------------------------
@@ -420,6 +457,7 @@ onglets = st.tabs([
     "💰 Gains et gagnants",
     "🎯 Probabilités",
     "📂 Archives",
+    "🎯 Générateur",
 ])
 
 regle = REGLES[jeu]
@@ -502,14 +540,14 @@ with onglets[1]:
             "Colonnes des numéros principaux",
             options=colonnes_numeriques,
             default=defaut_num,
-            key="colonnes_numeros",
+            key=cle_num,
         )
 
         colonnes_bonus = st.multiselect(
             "Colonnes des étoiles / numéro Chance",
             options=[c for c in colonnes_numeriques if c not in colonnes_num],
             default=[c for c in defaut_bonus if c not in colonnes_num],
-            key="colonnes_bonus",
+            key=cle_bonus,
         )
 
         for titre, colonnes in [
@@ -550,7 +588,7 @@ with onglets[1]:
 with onglets[2]:
     st.header("Combinaisons et numéros visuels")
     if df is not None:
-        choix = st.session_state.get("colonnes_numeros", [])
+        choix = st.session_state.get(cle_num, [])
         if len(choix) >= 2:
             nb_paires = st.slider(
                 "Nombre de tirages récents à examiner",
@@ -733,8 +771,6 @@ with onglets[5]:
             "les doublons et les fichiers chargés."
         )
 
-st.divider()
-
 # --------------------------------------------------
 # Générateur de grilles Néréon (un seul générateur)
 # --------------------------------------------------
@@ -868,163 +904,329 @@ def backtest(m, fenetre, poids, nb, tirages_test=300):
     }
 
 
-with st.expander(f"🧠 Générateur de grilles Néréon — {jeu}", expanded=True):
-    st.write(
-        "Néréon calcule d'abord les statistiques de l'archive (fréquence "
-        "globale, fréquence récente, retard), les teste contre le hasard, "
-        "puis tire des grilles en favorisant les numéros les mieux classés. "
-        "Le curseur « part du hasard » règle le mélange entre statistiques "
-        "et tirage aléatoire."
+STRATEGIES = {
+    "Fréquence globale": (1.0, 0.0, 0.0),
+    "Fréquence récente": (0.0, 1.0, 0.0),
+    "Retard": (0.0, 0.0, 1.0),
+    "Combinée": (1.0, 1.0, 1.0),
+}
+SEUIL_Z = 2.24  # 5 % unilatéral, corrigé pour les 4 méthodes testées
+
+
+def detecter_colonnes_jeu(table):
+    """Détecte seul les colonnes de numéros principaux et de bonus."""
+    num, bonus = [], []
+    for c in table.columns:
+        nom = str(c).strip().lower()
+        if re.fullmatch(r"(boule|numero|num|n)_?\d", nom):
+            num.append(c)
+        elif re.fullmatch(r"etoile_?\d|numero_?chance|chance", nom):
+            bonus.append(c)
+    return num, bonus
+
+
+@st.cache_data(show_spinner="Néréon analyse l'archive…")
+def analyser(m, nb, mx, fenetre):
+    """Toutes les analyses de Néréon sur la matrice des tirages."""
+    n_t = m.shape[0]
+    resultat = {"n_tirages": n_t}
+
+    # 1. Uniformité des fréquences
+    resultat["uniformite"] = test_uniformite(m)
+
+    # 2. Méthodes testées sur le passé contre le hasard
+    lignes, bruts = [], {}
+    for nom, poids in STRATEGIES.items():
+        bt = backtest(m, fenetre, poids, nb, tirages_test=500)
+        bruts[nom] = bt
+        if bt is not None:
+            lignes.append({
+                "Méthode": nom,
+                "Bons numéros / tirage": round(bt["moyenne"], 3),
+                "Hasard pur": round(bt["hasard"], 3),
+                "Écart (écarts-types)": round(bt["z"], 2),
+                "Bat le hasard ?": "oui" if bt["z"] >= SEUIL_Z else "non",
+            })
+    resultat["strategies"] = pd.DataFrame(lignes)
+    resultat["strategies_brutes"] = bruts
+
+    # 3. Schémas (parité, somme, étendue, consécutifs, moitié basse)
+    nums = np.nonzero(m)[1].reshape(n_t, nb) + 1
+    rng = np.random.default_rng(0)
+    simules = np.sort(
+        np.argsort(rng.random((20000, mx)), axis=1)[:, :nb] + 1, axis=1
     )
 
-    colonnes_gen = st.session_state.get("colonnes_numeros", [])
-    colonnes_gen_bonus = st.session_state.get("colonnes_bonus", [])
+    def carac(x):
+        return {
+            "Numéros pairs": (x % 2 == 0).sum(axis=1),
+            "Somme des numéros": x.sum(axis=1),
+            "Étendue (max − min)": x[:, -1] - x[:, 0],
+            "Numéros consécutifs": (np.diff(x, axis=1) == 1).sum(axis=1),
+            "Numéros dans la moitié basse": (x <= mx // 2).sum(axis=1),
+        }
 
-    g1, g2, g3 = st.columns(3)
-    nombre_grilles = st.slider("Nombre de grilles", 1, 10, 3, key="gen_nb")
-    part_hasard = g2.slider(
-        "Part du hasard (%)", 0, 100, 50, key="gen_alea",
-        help="0 % = on suit uniquement les statistiques · "
-             "100 % = tirage purement aléatoire",
+    obs, att = carac(nums), carac(simules)
+    lignes, bornes = [], {}
+    for nom in obs:
+        ecart_type = att[nom].std()
+        z = (obs[nom].mean() - att[nom].mean()) / (ecart_type / math.sqrt(n_t))
+        lignes.append({
+            "Schéma": nom,
+            "Moyenne observée": round(float(obs[nom].mean()), 2),
+            "Moyenne attendue (hasard)": round(float(att[nom].mean()), 2),
+            "Écart (écarts-types)": round(float(z), 2),
+            "Anormal ?": "oui" if abs(z) >= 3.3 else "non",
+        })
+        bornes[nom] = (
+            float(np.percentile(obs[nom], 5)),
+            float(np.percentile(obs[nom], 95)),
+        )
+    resultat["schemas"] = pd.DataFrame(lignes)
+    resultat["bornes"] = bornes
+
+    # 4. Paires qui sortent ensemble plus (ou moins) que prévu
+    co = m.T.astype(float) @ m.astype(float)
+    p_paire = (nb * (nb - 1)) / (mx * (mx - 1))
+    attendu = n_t * p_paire
+    ecart_type = math.sqrt(n_t * p_paire * (1 - p_paire))
+    i, j = np.triu_indices(mx, 1)
+    z_paires = (co[i, j] - attendu) / ecart_type
+    ordre = np.argsort(-np.abs(z_paires))[:10]
+    resultat["paires"] = pd.DataFrame({
+        "Paire": [f"{i[k] + 1} – {j[k] + 1}" for k in ordre],
+        "Sorties ensemble": [int(co[i[k], j[k]]) for k in ordre],
+        "Attendu (hasard)": round(attendu, 1),
+        "Écart (écarts-types)": [round(float(z_paires[k]), 2) for k in ordre],
+    })
+    resultat["nb_paires_anormales"] = int((np.abs(z_paires) >= 4.1).sum())
+    resultat["nb_paires_testees"] = int(len(z_paires))
+    return resultat
+
+
+def grille_conforme(numeros, bornes, mx):
+    """La grille respecte-t-elle les schémas observés (5 %–95 %) ?"""
+    x = np.array(numeros)
+    mesures = {
+        "Numéros pairs": (x % 2 == 0).sum(),
+        "Somme des numéros": x.sum(),
+        "Étendue (max − min)": x[-1] - x[0],
+        "Numéros consécutifs": (np.diff(x) == 1).sum(),
+        "Numéros dans la moitié basse": (x <= mx // 2).sum(),
+    }
+    return all(
+        bornes[nom][0] <= valeur <= bornes[nom][1]
+        for nom, valeur in mesures.items()
     )
-    fenetre = g3.slider(
-        "Fenêtre « récente » (tirages)", 20, 500, 100, key="gen_fenetre"
+
+
+with onglets[6]:
+    st.header("🎯 Générateur autonome Néréon")
+    st.caption(
+        "Néréon détecte les colonnes, analyse toute l'archive, teste chaque "
+        "méthode contre le hasard et décide seul de la stratégie."
     )
 
-    with st.expander("Réglages avancés : poids des analyses"):
-        w_f = st.slider("Fréquence globale", 0.0, 2.0, 1.0, 0.1, key="w_f")
-        w_r = st.slider("Fréquence récente", 0.0, 2.0, 1.0, 0.1, key="w_r")
-        w_t = st.slider("Retard", 0.0, 2.0, 1.0, 0.1, key="w_t")
+    if df is None:
+        st.info(
+            "Aucune archive disponible. Néréon télécharge seul les archives "
+            "FDJ ; si ça échoue, importe un fichier ou utilise « Recharger »."
+        )
+    else:
+        auto_num, auto_bonus = detecter_colonnes_jeu(df)
+        cols_n = st.session_state.get(cle_num) or auto_num
+        cols_b = st.session_state.get(cle_bonus) or auto_bonus
 
-    if st.button("🎯 Analyser et générer", key="gen_bouton"):
-        if df is None or not colonnes_gen:
+        m_num = (
+            matrice_tirages(df, cols_n, regle["nb_num"], regle["max_num"])
+            if cols_n else None
+        )
+
+        if m_num is None or len(m_num) < 100:
             st.error(
-                "Importe les archives et vérifie les colonnes de numéros "
-                "dans l'onglet Fréquences avant de générer."
+                "Néréon n'a pas trouvé assez de tirages complets conformes "
+                f"aux règles actuelles ({regle['nb_num']} numéros entre 1 et "
+                f"{regle['max_num']}). Vérifie le jeu choisi et les colonnes "
+                "dans l'onglet Fréquences."
             )
         else:
-            m_num = matrice_tirages(
-                df, colonnes_gen, regle["nb_num"], regle["max_num"]
+            m_bonus = (
+                matrice_tirages(
+                    df, cols_b, regle["nb_bonus"], regle["max_bonus"]
+                ) if cols_b else None
             )
-            if m_num is None or len(m_num) < 50:
-                st.error(
-                    "Pas assez de tirages complets conformes aux règles "
-                    f"actuelles ({regle['nb_num']} numéros entre 1 et "
-                    f"{regle['max_num']}). Vérifie le jeu et les colonnes."
+            if m_bonus is not None and len(m_bonus) < 100:
+                m_bonus = None
+
+            r1, r2 = st.columns(2)
+            nombre_grilles = r1.slider("Nombre de grilles", 1, 10, 3,
+                                       key="gen_nb")
+            fenetre = r2.slider("Fenêtre « récente » (tirages)", 20, 500, 100,
+                                key="gen_fenetre")
+            with st.expander("Réglages manuels (facultatif)"):
+                auto = st.checkbox(
+                    "Laisser Néréon choisir la part de hasard", value=True,
+                    key="gen_auto",
+                )
+                part_hasard = st.slider(
+                    "Part du hasard (%)", 0, 100, 70, key="gen_alea",
+                    disabled=auto,
+                )
+                filtre_schemas = st.checkbox(
+                    "N'accepter que des grilles conformes aux schémas "
+                    "observés (parité, somme, étendue, consécutifs)",
+                    value=True, key="gen_schemas",
+                )
+
+            a = analyser(m_num, regle["nb_num"], regle["max_num"], fenetre)
+
+            # ---------- 1. Constat ----------
+            st.subheader("1. Ce que Néréon a constaté")
+            st.write(
+                f"{a['n_tirages']:,} tirages complets analysés"
+                f" (sur {len(df):,} lignes d'archive).".replace(",", " ")
+            )
+
+            chi2, p_val = a["uniformite"]
+            if p_val < 0.05:
+                st.write(
+                    f"**Fréquences** : écart notable avec le hasard pur "
+                    f"(p = {p_val:.3f}). Cela peut venir d'un changement de "
+                    "règles ou d'archives mélangées, pas forcément d'un "
+                    "signal."
                 )
             else:
-                poids = (w_f, w_r, w_t)
+                st.write(
+                    f"**Fréquences** : compatibles avec le hasard pur "
+                    f"(p = {p_val:.3f}). Aucun numéro n'est statistiquement "
+                    "favorisé."
+                )
+
+            st.write("**Méthodes testées sur le passé** (sans regarder le "
+                     "futur) contre une grille tirée au hasard :")
+            if len(a["strategies"]):
+                tableau(a["strategies"], hide_index=True)
+
+            st.write("**Schémas des tirages** comparés à 20 000 tirages "
+                     "aléatoires :")
+            tableau(a["schemas"], hide_index=True)
+
+            st.write("**Paires** les plus éloignées de l'attendu :")
+            tableau(a["paires"], hide_index=True)
+            st.caption(
+                f"{a['nb_paires_anormales']} paire(s) sur "
+                f"{a['nb_paires_testees']} dépassent le seuil corrigé "
+                "(4,1 écarts-types). Avec autant de paires testées, "
+                "quelques écarts apparents sont normaux."
+            )
+
+            # ---------- 2. Décision ----------
+            st.subheader("2. Décision de Néréon")
+            brutes = {
+                k: v for k, v in a["strategies_brutes"].items()
+                if v is not None
+            }
+            if brutes:
+                meilleure = max(brutes, key=lambda k: brutes[k]["z"])
+                avantage = brutes[meilleure]["z"] >= SEUIL_Z
+            else:
+                meilleure, avantage = "Combinée", False
+
+            if avantage:
+                nom_strategie = meilleure
+                alea = 0.3
+                st.success(
+                    f"La méthode « {meilleure} » bat le hasard sur "
+                    f"l'historique (écart {brutes[meilleure]['z']:+.2f}). "
+                    "Néréon l'utilise avec 30 % de hasard. À confirmer sur "
+                    "les prochains tirages : un résultat passé peut être "
+                    "dû à la chance."
+                )
+            else:
+                nom_strategie = "Combinée"
+                alea = 0.8
+                st.warning(
+                    "Aucune méthode ne bat le hasard de façon significative. "
+                    "Les statistiques ne permettent pas de désigner des "
+                    "numéros plus probables : Néréon utilise la méthode "
+                    "combinée avec 80 % de hasard, pour des grilles variées "
+                    "sans avantage réel."
+                )
+            if not auto:
                 alea = part_hasard / 100
 
-                st.write("#### 1. Ce que disent les statistiques")
-                st.write(
-                    f"{len(m_num):,} tirages complets analysés "
-                    f"(sur {len(df):,} lignes)."
+            poids = STRATEGIES[nom_strategie]
+            freq, recent, retard = composantes(m_num, fenetre)
+            p_stat = poids_statistiques(freq, recent, retard, poids)
+            p_num = melanger_avec_hasard(p_stat, alea)
+            rang_num = rang_normalise(p_stat) * 100
+
+            if m_bonus is not None:
+                fb, rb, tb = composantes(m_bonus, fenetre)
+                p_bonus_stat = poids_statistiques(fb, rb, tb, poids)
+                p_bonus = melanger_avec_hasard(p_bonus_stat, alea)
+            else:
+                p_bonus = np.full(regle["max_bonus"], 1 / regle["max_bonus"])
+                st.caption(
+                    f"{regle['nom_bonus']} : colonnes non détectées, tirage "
+                    "aléatoire."
                 )
 
-                chi2, p_val = test_uniformite(m_num)
-                if p_val < 0.05:
-                    st.write(
-                        f"**Test d'uniformité** : écart notable avec le "
-                        f"hasard pur (p = {p_val:.3f}). Il peut venir de "
-                        "changements de règles ou d'un mélange d'archives ; "
-                        "à vérifier avant d'y voir un signal."
-                    )
-                else:
-                    st.write(
-                        f"**Test d'uniformité** : les fréquences sont "
-                        f"compatibles avec le hasard pur (p = {p_val:.3f}). "
-                        "Aucun numéro n'est statistiquement favorisé."
-                    )
+            # ---------- 3. Grilles ----------
+            st.subheader("3. Grilles proposées")
+            total = math.comb(regle["max_num"], regle["nb_num"]) * (
+                math.comb(regle["max_bonus"], regle["nb_bonus"])
+            )
+            rng = np.random.default_rng()
+            vues, essais = set(), 0
+            while len(vues) < nombre_grilles and essais < 5000:
+                essais += 1
+                numeros = tirer_grille(p_num, regle["nb_num"], rng)
+                if filtre_schemas and not grille_conforme(
+                    numeros, a["bornes"], regle["max_num"]
+                ):
+                    continue
+                bonus = tirer_grille(p_bonus, regle["nb_bonus"], rng)
+                cle = (tuple(numeros), tuple(bonus))
+                if cle in vues:
+                    continue
+                vues.add(cle)
+                indice = float(np.mean([rang_num[n - 1] for n in numeros]))
+                st.markdown(f"**Grille {len(vues)}**")
+                c1, c2, c3 = st.columns([5, 3, 2])
+                c1.write("Numéros : " + " · ".join(map(str, numeros)))
+                c2.write(
+                    f"{regle['nom_bonus']} : " + " · ".join(map(str, bonus))
+                )
+                c3.write(f"Indice statistique : {indice:.0f}/100")
 
-                bt = backtest(m_num, fenetre, poids, regle["nb_num"])
-                if bt is not None:
-                    st.write(
-                        f"**Test sur le passé** ({bt['tirages']} derniers "
-                        f"tirages, sans regarder le futur) : la méthode "
-                        f"obtient en moyenne {bt['moyenne']:.3f} bons "
-                        f"numéros par tirage contre {bt['hasard']:.3f} pour "
-                        f"une grille au hasard (écart : {bt['z']:+.2f} "
-                        "écart-type)."
-                    )
-                    if abs(bt["z"]) < 2:
-                        st.caption(
-                            "L'écart n'est pas significatif : la méthode ne "
-                            "fait pas mieux que le hasard sur cet historique."
-                        )
-                    elif bt["z"] >= 2:
-                        st.caption(
-                            "Écart significatif sur l'historique, mais "
-                            "méfie-toi : tester beaucoup de réglages produit "
-                            "de faux positifs."
-                        )
-
-                freq, recent, retard = composantes(m_num, fenetre)
-                p_num = melanger_avec_hasard(
-                    poids_statistiques(freq, recent, retard, poids), alea
+            if len(vues) < nombre_grilles:
+                st.caption(
+                    "Moins de grilles que demandé : les filtres sont trop "
+                    "stricts. Décoche le filtre de schémas dans les réglages."
                 )
 
-                m_bonus = matrice_tirages(
-                    df, colonnes_gen_bonus,
-                    regle["nb_bonus"], regle["max_bonus"],
-                ) if colonnes_gen_bonus else None
-                if m_bonus is not None and len(m_bonus) >= 50:
-                    fb, rb, tb = composantes(m_bonus, fenetre)
-                    p_bonus = melanger_avec_hasard(
-                        poids_statistiques(fb, rb, tb, poids), alea
-                    )
-                else:
-                    p_bonus = np.full(
-                        regle["max_bonus"], 1 / regle["max_bonus"]
-                    )
-                    st.caption(
-                        f"{regle['nom_bonus']} : colonnes non sélectionnées "
-                        "ou insuffisantes, tirage aléatoire."
-                    )
+            st.info(
+                f"**Probabilité réelle de jackpot : 1 sur "
+                f"{total:,}".replace(",", " ")
+                + "**, identique pour chacune de ces grilles et pour "
+                "n'importe quelle autre combinaison valide. L'indice "
+                "statistique indique seulement à quel point les numéros "
+                "sont bien classés par l'analyse du passé ; ce n'est pas "
+                "une probabilité de gagner."
+            )
 
-                st.write("#### 2. Grilles proposées")
-                rng = np.random.default_rng()
-                vues = set()
-                essais = 0
-                while len(vues) < nombre_grilles and essais < 500:
-                    essais += 1
-                    numeros = tirer_grille(p_num, regle["nb_num"], rng)
-                    bonus = tirer_grille(p_bonus, regle["nb_bonus"], rng)
-                    cle = (tuple(numeros), tuple(bonus))
-                    if cle in vues:
-                        continue
-                    vues.add(cle)
-                    st.markdown(f"**Grille {len(vues)}**")
-                    c1, c2 = st.columns([5, 2])
-                    c1.write("Numéros : " + " · ".join(map(str, numeros)))
-                    c2.write(
-                        f"{regle['nom_bonus']} : "
-                        + " · ".join(map(str, bonus))
-                    )
-
+            with st.expander("Détail : poids de chaque numéro"):
                 classement = (
                     pd.DataFrame({
                         "Numéro": np.arange(1, regle["max_num"] + 1),
                         "Occurrences": freq.astype(int),
-                        f"Occurrences ({fenetre} derniers)": recent.astype(int),
+                        f"Occurrences ({fenetre} derniers)":
+                            recent.astype(int),
                         "Retard (tirages)": retard.astype(int),
                         "Poids de tirage (%)": (p_num * 100).round(2),
                     })
                     .sort_values("Poids de tirage (%)", ascending=False)
                     .reset_index(drop=True)
                 )
-                with st.expander("Détail : poids de chaque numéro"):
-                    tableau(classement, hide_index=True)
-
-                st.info(
-                    "Ces grilles sont celles que les statistiques "
-                    "privilégient, pas des grilles plus probables : au "
-                    "tirage, toute combinaison valide a exactement la même "
-                    "chance de sortir. Plus la part du hasard est élevée, "
-                    "plus la grille ressemble à un tirage aléatoire."
-                )
-
-st.caption(
-    "MonIA — outil d'analyse descriptive. Les résultats dépendent de la "
-    "qualité, de la couverture et du format des archives importées."
-)
+                tableau(classement, hide_index=True)
