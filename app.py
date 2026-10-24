@@ -456,6 +456,15 @@ with onglets[3]:
     else:
         candidats = [
             c for c in df.columns
+            if any(
+                m in nom_normalise(c)
+                for m in (
+                    "gain", "rapport", "jackpot", "lot",
+                    "gagnant", "winner", "prize", "rang", "montant",
+                )
+            )
+        ]
+
 
 def nom_normalise(nom):
     texte = str(nom).lower().strip()
