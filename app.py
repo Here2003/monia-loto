@@ -189,85 +189,109 @@ with onglets[0]:
 # 2. Fréquences des numéros
 # --------------------------------------------------
 
+
+# --------------------------------------------------
+# 2. FREQUENCES DES NUMEROS ET DES ETOILES
+# --------------------------------------------------
+
 with onglets[1]:
     st.header("Fréquences et récurrences")
-    if df is not None:
-        st.write(
-            "Sélectionne uniquement les colonnes correspondant aux "
-            "numéros réellement tirés, pas les dates, les gains ou les identifiants."
-        )
-        colonnes_numeriques = []
-        for col in df.columns:
-            valeurs = pd.to_numeric(df[col], errors="coerce")
-            if valeurs.notna().sum() > 0:
-                colonnes_numeriques.append(col)
 
-        suggestions = [
-            c for c in colonnes_numeriques
-            if re.search(
-                r"boule|numero|numéro|chance|étoile|etoile|number|ball",
-                c,
-                re.IGNORECASE,
-            )
+    if df is None:
+        st.info("Importe les archives pour commencer l'analyse.")
+    else:
+        st.write(
+            "Sélectionne séparément les colonnes des numéros principaux "
+            "et celles des étoiles ou du numéro Chance."
+        )
+
+        colonnes_numeriques = [
+            c for c in df.columns
+            if pd.to_numeric(df[c], errors="coerce").notna().sum() > 0
         ]
 
-        choix = st.multiselect(
-            "Colonnes des numéros tirés",
+        colonnes_num = st.multiselect(
+            "Colonnes des numéros principaux",
             options=colonnes_numeriques,
-            default=suggestions,
             key="colonnes_numeros",
         )
 
-        if choix:
-            serie = pd.concat(
+        colonnes_bonus = st.multiselect(
+            "Colonnes des étoiles / numéro Chance",
+            options=[
+                c for c in colonnes_numeriques if c not in colonnes_num
+            ],
+            key="colonnes_bonus",
+        )
+
+        def calculer_frequences(colonnes):
+            if not colonnes:
+                return None
+
+            valeurs = pd.concat(
                 [
                     pd.to_numeric(df[c], errors="coerce")
-                    for c in choix
+                    for c in colonnes
                 ],
                 ignore_index=True,
             ).dropna()
-            serie = serie[serie % 1 == 0].astype(int)
-            frequences = serie.value_counts().sort_index()
-            total = int(frequences.sum())
 
-            if total:
-                stats = pd.DataFrame({
-                    "Numéro": frequences.index,
-                    "Occurrences": frequences.values,
-                    "Fréquence (%)": (
-                        frequences.values / total * 100
-                    ).round(3),
-                }).sort_values(
-                    ["Occurrences", "Numéro"],
-                    ascending=[False, True],
+            valeurs = valeurs[valeurs % 1 == 0].astype(int)
+
+            if valeurs.empty:
+                return None
+
+            compte = valeurs.value_counts().sort_index()
+
+            resultat = pd.DataFrame({
+                "Numéro": compte.index,
+                "Occurrences": compte.values,
+                "Fréquence (%)": (
+                    compte.values / compte.sum() * 100
+                ).round(3),
+            })
+
+            return resultat.sort_values(
+                ["Occurrences", "Numéro"],
+                ascending=[False, True],
+            )
+
+        for titre, colonnes in [
+            ("Numéros principaux", colonnes_num),
+            ("Étoiles / numéro Chance", colonnes_bonus),
+        ]:
+            st.subheader(titre)
+            resultat = calculer_frequences(colonnes)
+
+            if resultat is not None:
+                gauche, droite = st.columns(2)
+                gauche.metric(
+                    "Valeurs comptées",
+                    int(resultat["Occurrences"].sum()),
+                )
+                droite.metric(
+                    "Valeurs distinctes",
+                    len(resultat),
                 )
 
-                a, b = st.columns(2)
-                a.metric("Valeurs numériques comptées", f"{total:,}")
-                b.metric("Numéros distincts", len(frequences))
-
-                st.write("### Classement des numéros")
                 st.dataframe(
-                    stats,
+                    resultat,
                     hide_index=True,
                     use_container_width=True,
                 )
-                st.write("### Graphique des occurrences")
-                st.bar_chart(
-                    stats.set_index("Numéro")[["Occurrences"]]
-                )
 
-                st.caption(
-                    "Attention : les étoiles EuroMillions et les numéros "
-                    "principaux appartiennent à des ensembles différents. "
-                    "Analyse-les séparément pour éviter de fausser les fréquences."
+                st.bar_chart(
+                    resultat.set_index("Numéro")[["Occurrences"]]
                 )
-        else:
-            st.warning(
-                "Choisis les colonnes des numéros pour calculer les fréquences."
-            )
-    else:
-        st.write("Importe une archive pour calculer les fréquences.")
+            else:
+                st.info("Sélectionne les colonnes correspondantes.")
+
+        st.warning(
+            "Vérifie les colonnes choisies : MonIA ne peut pas connaître "
+            "leur signification avec certitude à partir de leur contenu seul. "
+            "Ces fréquences décrivent le passé et ne prédisent pas le prochain tirage."
+        )
+
 
 # --------------------------------------------------
 # 3. Combinaisons et boules
