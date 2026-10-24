@@ -698,3 +698,381 @@ st.caption(
     "Les sources externes ne sont considérées comme consultées "
     "qu'après un accès effectif."
 )
+
+# ============================================================
+# GENERATEUR DE GRILLES NEREON
+# Frequences historiques + retards + equilibre
+# ============================================================
+
+import random
+
+
+def generer_grille_nereon(
+    frame,
+    colonnes,
+    jeu_selectionne,
+    mode="mixte",
+    utiliser_bonus=True,
+    colonnes_bonus=None,
+):
+    """Genere une grille a partir des archives chargees.
+
+    Les scores servent a classer les numeros historiques.
+    Ils ne constituent pas une prediction des prochains tirages.
+    """
+    if frame is None or frame.empty:
+        raise ValueError("Aucune archive n'est chargee.")
+
+    if len(colonnes) != 5:
+        raise ValueError(
+            "Selectionne exactement 5 colonnes de numeros principaux."
+        )
+
+    if jeu_selectionne == "EuroMillions":
+        max_numero = 50
+        max_bonus = 12
+        nb_bonus = 2
+    else:
+        max_numero = 49
+        max_bonus = 10
+        nb_bonus = 1
+
+    donnees = convertir_numeros(frame, colonnes)
+
+    if donnees.empty:
+        raise ValueError("Les colonnes selectionnees sont vides.")
+
+    # Garder les lignes contenant exactement cinq numeros valides.
+    lignes = []
+    for _, ligne in donnees.iterrows():
+        valeurs = ligne.dropna().astype(int).tolist()
+        if (
+            len(valeurs) == 5
+            and len(set(valeurs)) == 5
+            and all(1 <= n <= max_numero for n in valeurs)
+        ):
+            lignes.append(valeurs)
+
+    if len(lignes) < 10:
+        raise ValueError(
+            "Il faut au moins 10 tirages valides pour une analyse "
+            "historique indicative. Verifie les colonnes et les archives."
+        )
+
+    total = len(lignes)
+    comptes = Counter(n for tirage in lignes for n in tirage)
+    frequences = {
+        n: comptes.get(n, 0) / total
+        for n in range(1, max_numero + 1)
+    }
+
+    # Retard actuel : nombre de tirages depuis la derniere sortie.
+    retards = {}
+    for n in range(1, max_numero + 1):
+        retard = 0
+        for tirage in reversed(lignes):
+            if n in tirage:
+                break
+            retard += 1
+        retards[n] = retard
+
+    freq_max = max(frequences.values()) or 1
+    retard_max = max(retards.values()) or 1
+
+    scores = {}
+    for n in range(1, max_numero + 1):
+        f = frequences[n] / freq_max
+        r = retards[n] / retard_max
+
+        if mode == "frequences":
+            score = f
+        elif mode == "retards":
+            score = r
+        else:
+            # Priorite aux frequences, avec une contribution moderee
+            # des retards. Cela ne change pas la probabilite reelle.
+            score = 0.65 * f + 0.35 * r
+
+        scores[n] = max(score, 0.01)
+
+    # Pondération des choix sans remise.
+    def choisir_pondere(candidats, poids):
+        candidats = list(candidats)
+        poids = [max(float(poids[n]), 0.001) for n in candidats]
+        return random.choices(candidats, weights=poids, k=1)[0]
+
+    def construire_numeros():
+        choisis = []
+
+        for _ in range(5):
+            disponibles = [n for n in scores if n not in choisis]
+
+            # Equilibre souple entre petits/grands et pairs/impairs.
+            def poids_equilibre(n):
+                poids = scores[n]
+
+                if len(choisis) >= 2:
+                    nb_pairs = sum(x % 2 == 0 for x in choisis)
+                    nb_impairs = len(choisis) - nb_pairs
+
+                    if n % 2 == 0 and nb_pairs >= 3:
+                        poids *= 0.55
+                    if n % 2 == 1 and nb_impairs >= 3:
+                        poids *= 0.55
+
+                    nb_bas = sum(x <= max_numero // 2 for x in choisis)
+                    nb_hauts = len(choisis) - nb_bas
+
+                    if n <= max_numero // 2 and nb_bas >= 3:
+                        poids *= 0.60
+                    if n > max_numero // 2 and nb_hauts >= 3:
+                        poids *= 0.60
+
+                return poids
+
+            poids = {n: poids_equilibre(n) for n in disponibles}
+            choisis.append(choisir_pondere(disponibles, poids))
+
+        return sorted(choisis)
+
+    def construire_bonus():
+        if not utiliser_bonus:
+            return []
+
+        bonus_cols = colonnes_bonus or []
+        bonus_cols = [
+            c for c in bonus_cols
+            if c in frame.columns and c not in colonnes
+        ]
+
+        # Si les colonnes bonus n'ont pas ete selectionnees,
+        # tirage aleatoire uniforme plutot que fausse analyse.
+        if not bonus_cols:
+            return sorted(random.sample(range(1, max_bonus + 1), nb_bonus))
+
+        bonus_data = convertir_numeros(frame, bonus_cols)
+        compte_bonus = Counter()
+
+        for _, ligne in bonus_data.iterrows():
+            vals = ligne.dropna().astype(int).tolist()
+            vals = [
+                n for n in vals
+                if 1 <= n <= max_bonus
+            ]
+            compte_bonus.update(set(vals))
+
+        total_bonus = sum(compte_bonus.values())
+        if total_bonus == 0:
+            return sorted(random.sample(range(1, max_bonus + 1), nb_bonus))
+
+        poids_bonus = {
+            n: max(compte_bonus.get(n, 0) / total_bonus, 0.001)
+            for n in range(1, max_bonus + 1)
+        }
+
+        result = []
+        for _ in range(nb_bonus):
+            dispo = [n for n in poids_bonus if n not in result]
+            result.append(choisir_pondere(dispo, poids_bonus))
+
+        return sorted(result)
+
+    numeros = construire_numeros()
+    bonus = construire_bonus()
+
+    details = []
+    for n in numeros:
+        details.append({
+            "Numero": n,
+            "Occurrences historiques": comptes.get(n, 0),
+            "Frequence (%)": round(frequences[n] * 100, 2),
+            "Retard (tirages)": retards[n],
+        })
+
+    return {
+        "numeros": numeros,
+        "bonus": bonus,
+        "details": details,
+        "tirages_valides": total,
+    }
+
+
+def generer_cinq_grilles(
+    frame,
+    colonnes,
+    jeu_selectionne,
+    mode="mixte",
+    utiliser_bonus=True,
+    colonnes_bonus=None,
+):
+    """Construit cinq grilles, avec repetitions limitees."""
+    grilles = []
+    signatures = set()
+
+    for _ in range(100):
+        if len(grilles) >= 5:
+            break
+
+        grille = generer_grille_nereon(
+            frame=frame,
+            colonnes=colonnes,
+            jeu_selectionne=jeu_selectionne,
+            mode=mode,
+            utiliser_bonus=utiliser_bonus,
+            colonnes_bonus=colonnes_bonus,
+        )
+
+        signature = (
+            tuple(grille["numeros"]),
+            tuple(grille["bonus"]),
+        )
+
+        if signature not in signatures:
+            signatures.add(signature)
+            grilles.append(grille)
+
+    return grilles
+
+
+# ============================================================
+# INTERFACE DU GENERATEUR
+# ============================================================
+
+st.divider()
+st.title("🎯 Generateur de grilles Nereon")
+st.write(
+    "Cinq grilles basees sur les frequences historiques, "
+    "les retards observes et un equilibre pair/impair "
+    "et petits/grands numeros."
+)
+
+if df is None:
+    st.info(
+        "Importe d'abord une archive historique dans la barre laterale."
+    )
+else:
+    colonnes_disponibles = list(df.columns)
+    colonnes_detectees, bonus_detectes, numeriques = (
+        detecter_colonnes(df)
+    )
+
+    cols_generateur = st.session_state.get(
+        "colonnes_numeros", colonnes_detectees
+    )
+    cols_generateur = [
+        c for c in cols_generateur if c in colonnes_disponibles
+    ]
+
+    cols_bonus_generateur = st.session_state.get(
+        "colonnes_bonus", bonus_detectes
+    )
+    cols_bonus_generateur = [
+        c for c in cols_bonus_generateur
+        if c in colonnes_disponibles
+    ]
+
+    st.caption(
+        "Verifie les colonnes dans l'onglet Fréquences avant "
+        "de generer les grilles."
+    )
+
+    mode_generation = st.selectbox(
+        "Methode d'analyse",
+        options=["mixte", "frequences", "retards"],
+        format_func=lambda x: {
+            "mixte": "Mixte : frequences + retards + equilibre",
+            "frequences": "Priorite aux frequences historiques",
+            "retards": "Priorite aux retards observes",
+        }[x],
+        key="mode_generation_nereon",
+    )
+
+    inclure_bonus = st.checkbox(
+        "Inclure les etoiles / le numero Chance",
+        value=True,
+        key="bonus_generation_nereon",
+    )
+
+    if jeu == "EuroMillions":
+        st.caption(
+            "EuroMillions : 5 numeros de 1 a 50 et, si active, "
+            "2 etoiles de 1 a 12."
+        )
+    else:
+        st.caption(
+            "Loto : 5 numeros de 1 a 49 et, si active, "
+            "1 numero Chance de 1 a 10."
+        )
+
+    if st.button(
+        "✨ Generer mes 5 grilles",
+        type="primary",
+        key="bouton_generer_nereon",
+    ):
+        try:
+            if len(cols_generateur) != 5:
+                st.error(
+                    "Il faut selectionner exactement cinq colonnes "
+                    "de numeros principaux dans l'onglet Fréquences."
+                )
+            else:
+                grilles = generer_cinq_grilles(
+                    frame=df,
+                    colonnes=cols_generateur,
+                    jeu_selectionne=jeu,
+                    mode=mode_generation,
+                    utiliser_bonus=inclure_bonus,
+                    colonnes_bonus=cols_bonus_generateur,
+                )
+
+                if len(grilles) < 5:
+                    st.warning(
+                        "Cinq grilles toutes distinctes n'ont pas pu "
+                        "etre creees dans les tentatives effectuees."
+                    )
+
+                st.subheader("Tes grilles Néréon")
+
+                for i, grille in enumerate(grilles, start=1):
+                    nums = " — ".join(
+                        f"{n:02d}" for n in grille["numeros"]
+                    )
+                    texte = f"Grille {i} : {nums}"
+
+                    if inclure_bonus:
+                        label_bonus = (
+                            "Etoiles" if jeu == "EuroMillions"
+                            else "Chance"
+                        )
+                        bonus_txt = " — ".join(
+                            f"{n:02d}" for n in grille["bonus"]
+                        )
+                        texte += f" | {label_bonus} : {bonus_txt}"
+
+                    st.markdown(f"**{texte}**")
+
+                st.subheader("Analyse des numéros sélectionnés")
+                toutes_details = []
+
+                for i, grille in enumerate(grilles, start=1):
+                    for detail in grille["details"]:
+                        ligne = dict(detail)
+                        ligne["Grille"] = i
+                        toutes_details.append(ligne)
+
+                st.dataframe(
+                    pd.DataFrame(toutes_details),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+                st.info(
+                    f"Analyse fondee sur {grilles[0]['tirages_valides']} "
+                    "tirages valides. Les grilles sont des selections "
+                    "statistiques, pas des predictions gagnantes. "
+                    "Dans un tirage equitable, chaque combinaison "
+                    "valide conserve la meme probabilite."
+                )
+
+        except Exception as exc:
+            st.error(f"Impossible de generer les grilles : {exc}")
