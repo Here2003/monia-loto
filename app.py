@@ -126,47 +126,39 @@ def calculer_frequences(frame, colonnes, minimum=1, maximum=99):
 
     return result
 
-def calculer_frequences(
-    frame, colonnes, minimum=1, maximum=99
-):
-    donnees = convertir_numeros(frame, colonnes)
 
-    if donnees.empty:
-        return pd.DataFrame(
-            columns=[
-                "Numéro", "Occurrences", "Fréquence (%)"
-            ]
-        )
+def calculer_frequences(frame, colonnes, minimum=1, maximum=99):
+    colonnes = [c for c in colonnes if c in frame.columns]
+    colonnes_sortie = ["Numéro", "Occurrences", "Fréquence (%)"]
 
+    if not colonnes:
+        return pd.DataFrame(columns=colonnes_sortie)
 
+    donnees = frame[colonnes].apply(pd.to_numeric, errors="coerce")
     valeurs = donnees.stack().dropna()
+
+    if valeurs.empty:
+        return pd.DataFrame(columns=colonnes_sortie)
+
     valeurs = valeurs[ valeurs.map(math.isfinite) ]
     valeurs = valeurs[valeurs % 1 == 0]
     valeurs = valeurs.astype("int64")
+    valeurs = valeurs[
         (valeurs >= minimum) & (valeurs <= maximum)
     ]
 
-   
     if valeurs.empty:
-        return pd.DataFrame(
-            columns=["Numéro", "Occurrences", "Fréquence (%)"]
-        )
+        return pd.DataFrame(columns=colonnes_sortie)
 
-
-    comptes = valeurs.value_counts().sort_values(
-        ascending=False
+    comptes = valeurs.value_counts().sort_values(ascending=False)
+    result = comptes.rename_axis("Numéro").reset_index(
+        name="Occurrences"
     )
-
-    result = comptes.rename_axis(
-        "Numéro"
-    ).reset_index(name="Occurrences")
-
     result["Fréquence (%)"] = (
         result["Occurrences"] / len(valeurs) * 100
     ).round(3)
 
     return result
-
 
 def calculer_retards_par_tirage(
     frame, colonnes, minimum=1, maximum=99
