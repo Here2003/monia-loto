@@ -44,13 +44,77 @@ def nom_normalise(value):
                   .replace("î", "i").replace("ç", "c"))
 
 
-def trouver_colonne(df, candidats):
-    noms = {nom_normalise(c): c for c in df.columns}
-    for candidat in candidats:
-        c = noms.get(nom_normalise(candidat))
-        if c is not None:
-            return c
-    return None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def telecharger_archives(jeu):
+    cfg = CONFIG[jeu]
+    messages = []
+    archives = []
+    vus = set()
+
+    try:
+        page = requests.get(
+            cfg["page"],
+            headers=HEADERS,
+            timeout=30,
+        )
+        page.raise_for_status()
+        soup = BeautifulSoup(page.text, "html.parser")
+
+        # La FDJ publie des liens avec un identifiant de document.
+        # On récupère les véritables URL, sans fabriquer de ZIP.
+        liens = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            texte = a.get_text(" ", strip=True).lower()
+            contexte = (href + " " + texte).lower()
+
+            if "sto.api.fdj.fr" in href.lower():
+                if "documentations/" in href.lower():
+                    liens.append(href)
+            elif ".zip" in href.lower():
+                if href.startswith("/"):
+                    href = "https://www.fdj.fr" + href
+                if href.startswith("https://"):
+                    liens.append(href)
+
+        if not liens:
+            messages.append(
+                "Aucun lien d'archive détecté sur la page FDJ."
+            )
+
+        for url in dict.fromkeys(liens):
+            if url in vus:
+                continue
+            vus.add(url)
+
+            try:
+                r = requests.get(
+                    url,
+                    headers=HEADERS,
+                    timeout=45,
+                )
+                r.raise_for_status()
+
+                if not zipfile.is_zipfile(io.BytesIO(r.content)):
+                    messages.append(
+                        f"Le document reçu n'est pas un ZIP : {url}"
+                    )
+                    continue
+
+                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                    for nom in z.namelist():
+                        if nom.lower().endswith((".csv", ".txt")):
+                            archives.append((nom, z.read(nom)))
+
+            except Exception as e:
+                messages.append(f"Échec du téléchargement {url} : {e}")
+
+    except Exception as e:
+        messages.append(f"Impossible de lire la page FDJ : {e}")
+
+    return archives, messages, len(vus)
+
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
