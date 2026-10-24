@@ -146,12 +146,12 @@ def calculer_frequences(
         (valeurs >= minimum) & (valeurs <= maximum)
     ]
 
+   
     if valeurs.empty:
         return pd.DataFrame(
-            columns=[
-                "Numéro", "Occurrences", "Fréquence (%)"
-            ]
+            columns=["Numéro", "Occurrences", "Fréquence (%)"]
         )
+
 
     comptes = valeurs.value_counts().sort_values(
         ascending=False
