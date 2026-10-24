@@ -473,3 +473,61 @@ st.caption(
     "MonIA — outil d'analyse descriptive. Les résultats dépendent de la "
     "qualité, de la couverture et du format des archives importées."
 )
+
+# --------------------------------------------------
+# GENERATEUR DE GRILLES EUROMILLIONS
+# --------------------------------------------------
+
+import random
+
+with st.expander("🧠 Générateur de grilles EuroMillions", expanded=True):
+    st.write(
+        "MonIA peut générer des grilles et expliquer les critères "
+        "statistiques utilisés. Aucune méthode ne prédit un tirage."
+    )
+
+    nombre_grilles = st.slider(
+        "Nombre de grilles à générer",
+        min_value=1,
+        max_value=10,
+        value=3,
+        key="nombre_grilles_euromillions",
+    )
+
+    methode = st.selectbox(
+        "Méthode de génération",
+        [
+            "Aléatoire",
+            "Équilibrée (pairs/impairs)",
+        ],
+        key="methode_generation_euromillions",
+    )
+
+    if st.button("🎯 Générer mes grilles", key="generer_grilles_euromillions"):
+        grilles = []
+        for _ in range(nombre_grilles):
+            if methode == "Aléatoire":
+                numeros = sorted(random.sample(range(1, 51), 5))
+                etoiles = sorted(random.sample(range(1, 13), 2))
+            else:
+                numeros = []
+                while len(numeros) < 5:
+                    proposition = sorted(random.sample(range(1, 51), 5))
+                    pairs = sum(n % 2 == 0 for n in proposition)
+                    if 2 <= pairs <= 3:
+                        numeros = proposition
+                etoiles = sorted(random.sample(range(1, 13), 2))
+
+            grilles.append((numeros, etoiles))
+
+        for i, (numeros, etoiles) in enumerate(grilles, 1):
+            st.markdown(f"### Grille {i}")
+            c1, c2 = st.columns([5, 2])
+            c1.write("**Numéros** : " + " · ".join(map(str, numeros)))
+            c2.write("**Étoiles** : " + " · ".join(map(str, etoiles)))
+
+        st.info(
+            "Les deux méthodes produisent des grilles valides. "
+            "L'équilibre pair/impair est un critère de présentation, "
+            "pas un avantage démontré pour gagner."
+        )
