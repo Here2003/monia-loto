@@ -16,9 +16,8 @@ st.set_page_config(
 
 st.title("🧠 Néréon")
 st.subheader("Intelligence scientifique — Laboratoire MonIA")
-st.caption(Néréon — analyse les archives, teste les hypothèses et explique ses conclusions à partir des données."
+st.caption(Néréon — analyse les archives, teste les hypothèses et explique ses conclusions à partir des données.
 )
-
 # --------------------------------------------------
 # Chargement des archives
 # --------------------------------------------------
