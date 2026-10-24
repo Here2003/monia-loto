@@ -78,6 +78,21 @@ st.caption(
 # Chargement des archives
 # --------------------------------------------------
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def telecharger_archive(url):
+    """Télécharge une archive publique et renvoie son contenu."""
+    reponse = requests.get(
+        url,
+        timeout=30,
+        headers={"User-Agent": "MonIA-Nereon/1.0"}
+    )
+    reponse.raise_for_status()
+
+    if not reponse.content:
+        raise ValueError("Le fichier téléchargé est vide.")
+
+    return reponse.content
+
 @st.cache_data(show_spinner=False)
 def lire_fichier(nom, contenu):
     fichiers = []
