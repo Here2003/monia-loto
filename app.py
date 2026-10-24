@@ -240,6 +240,25 @@ def charger_page_fdj(url):
     reponse.raise_for_status()
     return reponse.url, reponse.status_code, reponse.text[:5000]
 
+def detecter_colonnes(frame):
+    """Repère les colonnes numériques et les colonnes bonus."""
+    numeriques = []
+
+    for col in frame.columns:
+        valeurs = pd.to_numeric(frame[col], errors="coerce")
+        if valeurs.notna().sum() > 0:
+            numeriques.append(col)
+
+    bonus_mots = ("etoile", "étoile", "star", "bonus", "chance")
+    bonus = [
+        c for c in numeriques
+        if any(mot in str(c).lower() for mot in bonus_mots)
+    ]
+
+    principaux = [c for c in numeriques if c not in bonus]
+
+    return principaux, bonus, numeriques
+
 st.title("🧠 Néréon")
 st.subheader("Le laboratoire scientifique de MonIA")
 st.caption(
