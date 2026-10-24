@@ -456,7 +456,18 @@ with onglets[3]:
     else:
         candidats = [
             c for c in df.columns
-            if any(m in nom_normalise(c) for m in (
+
+def nom_normalise(nom):
+    texte = str(nom).lower().strip()
+    remplacements = {
+        "é": "e", "è": "e", "ê": "e", "ë": "e",
+        "à": "a", "â": "a", "î": "i", "ï": "i",
+        "ô": "o", "ù": "u", "û": "u", "ç": "c",
+        "_": " ", "-": " ",
+    }
+    for a, b in remplacements.items():
+        texte = texte.replace(a, b)
+    return " ".join(texte.split())
                 "gain", "rapport", "jackpot", "lot", "gagnant",
                 "winner", "prize", "rang", "montant",
             ))
