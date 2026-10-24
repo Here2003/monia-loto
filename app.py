@@ -14,11 +14,10 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🧠 MonIA")
-st.subheader("Laboratoire d'analyse du Loto et d'EuroMillions")
-st.caption(
-    "Statistiques historiques, fréquences, gains et probabilités. "
-    "Les analyses passées ne prédisent pas les prochains tirages."
+st.title("🧠 Néréon")
+st.subheader("Intelligence scientifique — Laboratoire MonIA")
+st.caption(Néréon — analyse les archives, teste les hypothèses "
+    "et explique ses conclusions à partir des données."
 )
 
 # --------------------------------------------------
