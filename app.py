@@ -23,7 +23,7 @@ def lire_table(nom, contenu):
         for sep in (";", ",", "\t", "|"):
             try:
                 frame = pd.read_csv(
-@@ -50,30 +49,48 @@ def lire_table(nom, contenu):
+ def lire_table(nom, contenu):
                     on_bad_lines="skip",
                 )
                 if len(frame.columns) > 1 and not frame.empty:
