@@ -75,7 +75,21 @@ def lire_fichier(nom, contenu):
         "Format non pris en charge. Utilise CSV, TXT ou ZIP."
     )
 
+def convertir_numeros(frame, colonnes):
+    colonnes = [c for c in colonnes if c in frame.columns]
 
+    if not colonnes:
+        return pd.DataFrame()
+
+    resultat = frame[colonnes].apply(
+        pd.to_numeric, errors="coerce"
+    )
+
+    resultat = resultat.where(
+        resultat.notna() & (resultat % 1 == 0)
+    )
+
+    return resultat
 
 def calculer_frequences(frame, colonnes, minimum=1, maximum=99):
     colonnes = [c for c in colonnes if c in frame.columns]
