@@ -446,24 +446,47 @@ with onglets[2]:
                 "Les paires observées ne prédisent pas le prochain tirage."
             )
 
+
 with onglets[3]:
     st.header("Gains et gagnants publiés")
+
     if df is None:
         st.info(
             "Importe une archive contenant des données de gains "
             "ou de gagnants."
         )
     else:
-        candidats = [
-            c for c in df.columns
-            if any(
-                m in nom_normalise(c)
-                for m in (
-                    "gain", "rapport", "jackpot", "lot",
-                    "gagnant", "winner", "prize", "rang", "montant",
-                )
+        candidats = []
+
+        mots_gains = (
+            "gain", "rapport", "jackpot", "lot",
+            "gagnant", "winner", "prize", "rang", "montant",
+        )
+
+        for colonne in df.columns:
+            nom_colonne = nom_normalise(colonne)
+            if any(mot in nom_colonne for mot in mots_gains):
+                candidats.append(colonne)
+
+        if candidats:
+            st.write("Colonnes potentiellement liées aux gains :")
+            st.write(candidats)
+            st.dataframe(
+                df[candidats].head(100),
+                use_container_width=True,
             )
-        ]
+            st.warning(
+                "Vérifie les unités et les intitulés : "
+                "gagnants, gain individuel et montant total "
+                "sont des données différentes."
+            )
+        else:
+            st.info(
+                "Aucune colonne de gains ou de gagnants détectée "
+                "dans les fichiers importés."
+            )
+
+
 
 
 def nom_normalise(nom):
