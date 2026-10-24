@@ -76,81 +76,39 @@ def lire_fichier(nom, contenu):
     )
 
 
-def nom_normalise(nom):
-@@ -84,13 +101,600 @@ def nom_normalise(nom):
-        "ô": "o", "ù": "u", "û": "u", "ç": "c",
-        "_": " ", "-": " ",
-    }
 
-    for a, b in remplacements.items():
-        texte = texte.replace(a, b)
+def calculer_frequences(frame, colonnes, minimum=1, maximum=99):
+    colonnes = [c for c in colonnes if c in frame.columns]
 
-    return " ".join(texte.split())
-
-
-def detecter_colonnes(frame):
-    """Détection indicative basée sur les noms; l'utilisateur peut corriger."""
-    """Détection indicative des colonnes numériques."""
-    numeriques = []
-
-    for col in frame.columns:
-        vals = pd.to_numeric(frame[col], errors="coerce")
-        if vals.notna().sum() > 0:
-            numeriques.append(col)
-
-    mots_exclus = (
-        "date", "gain", "jackpot", "rapport", "rang",
-        "gagnant", "winner", "prize", "montant",
-        "annee", "heure", "tirage id", "identifiant",
-        "my million",
-    )
-
-    mots_bonus = (
-        "etoile", "star", "bonus", "chance",
-        "complementaire",
-    )
-
-    bonus = [
-        c for c in numeriques
-        if any(m in nom_normalise(c) for m in mots_bonus)
-    ]
-
-    candidats = [
-        c for c in numeriques
-        if c not in bonus
-        and not any(
-            m in nom_normalise(c) for m in mots_exclus
-        )
-    ]
-
-    explicites = [
-        c for c in candidats
-        if any(
-            m in nom_normalise(c)
-            for m in ("numero", "boule", "number", "num ")
-        )
-    ]
-
-    principaux = (
-        explicites if len(explicites) >= 3 else candidats
-    )
-
-    return principaux, bonus, numeriques
-
-
-def convertir_numeros(frame, colonnes):
     if not colonnes:
-        return pd.DataFrame()
+        return pd.DataFrame(
+            columns=["Numéro", "Occurrences", "Fréquence (%)"]
+        )
 
-    resultat = frame[colonnes].apply(
-        pd.to_numeric, errors="coerce"
+    donnees = frame[colonnes].apply(pd.to_numeric, errors="coerce")
+    valeurs = donnees.stack().dropna()
+    valeurs = valeurs[ valeurs.map(math.isfinite) ]
+    valeurs = valeurs[valeurs % 1 == 0]
+    valeurs = valeurs.astype("int64")
+    valeurs = valeurs[
+        (valeurs >= minimum) & (valeurs <= maximum)
+    ]
+
+    if valeurs.empty:
+        return pd.DataFrame(
+            columns=["Numéro", "Occurrences", "Fréquence (%)"]
+        )
+
+    comptes = valeurs.value_counts().sort_values(ascending=False)
+    result = comptes.rename_axis("Numéro").reset_index(
+        name="Occurrences"
     )
+    result["Fréquence (%)"] = (
+        result["Occurrences"] / len(valeurs) * 100
+    ).round(3)
 
-    resultat = resultat.where(
-        resultat.notna() & (resultat % 1 == 0)
-    )
+    return result
 
-    return resultat
 
 
 def calculer_frequences(
