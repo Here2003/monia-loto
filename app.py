@@ -385,7 +385,7 @@ with onglets[1]:
             st.dataframe(
                 stats, hide_index=True, use_container_width=True
             )
-            if not stats.empty:
+           if not stats.empty:
                 st.bar_chart(
                     stats.set_index("Numéro")[["Occurrences"]]
                 )
@@ -500,29 +500,6 @@ def nom_normalise(nom):
     for a, b in remplacements.items():
         texte = texte.replace(a, b)
     return " ".join(texte.split())
-                "gain", "rapport", "jackpot", "lot", "gagnant",
-                "winner", "prize", "rang", "montant",
-            ))
-        ]
-        if candidats:
-            st.write("Colonnes potentiellement liées aux gains :")
-            st.write(candidats)
-            st.dataframe(
-                df[candidats].head(100),
-                use_container_width=True,
-            )
-            st.warning(
-                "Vérifie les intitulés et les unités : "
-                "gagnants, gain individuel et montant total "
-                "sont différents."
-            )
-        else:
-            st.info(
-                "Aucune colonne de gains/gagnants détectée "
-                "dans les fichiers importés."
-            )
-
-with onglets[4]:
   
 with onglets[4]:
     st.header("Probabilités théoriques")
