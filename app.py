@@ -138,8 +138,7 @@ def calculer_frequences(
             ]
         )
 
-    valeurs = donnees.stack().astype(int)
-    valeurs = valeurs[
+valeurs = pd.to_numeric(donnees.stack(), errors="coerce").dropna().astype("int64")    valeurs = valeurs[
         (valeurs >= minimum) & (valeurs <= maximum)
     ]
 
