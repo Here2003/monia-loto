@@ -523,7 +523,10 @@ def nom_normalise(nom):
             )
 
 with onglets[4]:
+  
+with onglets[4]:
     st.header("Probabilités théoriques")
+
     if jeu == "EuroMillions":
         total = math.comb(50, 5) * math.comb(12, 2)
         st.write(
@@ -537,7 +540,10 @@ with onglets[4]:
             "parmi 49 et 1 numéro Chance parmi 10."
         )
 
-    st.metric("Probabilité théorique du jackpot", f"1 sur {total:,}")
+    st.metric(
+        "Probabilité théorique du jackpot",
+        f"1 sur {total:,}"
+    )
     st.caption(
         "Ces règles ne s'appliquent pas nécessairement "
         "à toutes les périodes historiques."
@@ -547,6 +553,7 @@ with onglets[4]:
         "combinaison valide a la même probabilité. "
         "Les fréquences passées ne rendent pas un numéro « dû »."
     )
+
 
 with onglets[5]:
     st.header("Explorateur des archives")
