@@ -182,6 +182,75 @@ if not tables:
     )
 
 # --------------------------------------------------
+# MOTEUR STATISTIQUE DE NEREON
+# --------------------------------------------------
+
+def analyser_frequences(valeurs):
+    """Calcule les fréquences observées dans une série de numéros."""
+    serie = pd.to_numeric(
+        pd.Series(valeurs), errors="coerce"
+    ).dropna()
+
+    serie = serie[serie % 1 == 0].astype(int)
+
+    if serie.empty:
+        return pd.DataFrame(
+            columns=["Numéro", "Occurrences", "Fréquence (%)"]
+        )
+
+    comptes = serie.value_counts().sort_values(
+        ascending=False
+    )
+
+    resultat = comptes.rename_axis("Numéro").reset_index(
+        name="Occurrences"
+    )
+
+    resultat["Fréquence (%)"] = (
+        resultat["Occurrences"] / len(serie) * 100
+    ).round(2)
+
+    return resultat
+
+
+def analyser_retards(valeurs):
+    """Compte les tirages écoulés depuis la dernière apparition."""
+    serie = pd.to_numeric(
+        pd.Series(valeurs), errors="coerce"
+    ).dropna()
+
+    serie = serie[serie % 1 == 0].astype(int).tolist()
+
+    if not serie:
+        return pd.DataFrame(
+            columns=["Numéro", "Retard (tirages)"]
+        )
+
+    presents = set(serie)
+    maximum = max(presents)
+
+    resultat = []
+
+    for numero in range(1, maximum + 1):
+        retard = 0
+
+        for valeur in reversed(serie):
+            if valeur == numero:
+                break
+            retard += 1
+
+        resultat.append({
+            "Numéro": numero,
+            "Retard (tirages)": (
+                retard if numero in presents else len(serie)
+            ),
+        })
+
+    return pd.DataFrame(resultat).sort_values(
+        "Retard (tirages)", ascending=False
+    ).reset_index(drop=True)
+
+# --------------------------------------------------
 # Préparation des données
 # --------------------------------------------------
 
