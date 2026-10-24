@@ -8,39 +8,37 @@ from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 
+
 def lire_table(nom, contenu):
-    """Essaie plusieurs encodages et séparateurs pour lire CSV/TXT."""
-    erreurs = []
-    """Lit les fichiers CSV et TXT avec plusieurs encodages."""
+    """Lit un fichier CSV ou TXT avec plusieurs encodages."""
     for encodage in ("utf-8-sig", "cp1252", "latin1"):
         try:
             texte = contenu.decode(encodage)
-        except UnicodeDecodeError as exc:
-            erreurs.append(str(exc))
         except UnicodeDecodeError:
             continue
 
         for sep in (";", ",", "\t", "|"):
             try:
                 frame = pd.read_csv(
- def lire_table(nom, contenu):
+                    io.StringIO(texte),
+                    sep=sep,
+                    dtype=str,
                     on_bad_lines="skip",
                 )
+
                 if len(frame.columns) > 1 and not frame.empty:
-                    frame.columns = [str(c).strip() for c in frame.columns]
                     frame.columns = [
-                        str(c).strip() for c in frame.columns
+                        str(col).strip() for col in frame.columns
                     ]
                     return frame
-            except Exception as exc:
-                erreurs.append(str(exc))
-    raise ValueError(f"Impossible de lire {nom} comme CSV/TXT.")
+
             except Exception:
                 continue
 
     raise ValueError(
-        f"Impossible de lire {nom} comme CSV/TXT."
+        f"Impossible de lire le fichier {nom} comme CSV/TXT."
     )
+
 
 
 def lire_fichier(nom, contenu):
