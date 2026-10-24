@@ -91,6 +91,7 @@ def convertir_numeros(frame, colonnes):
 
     return resultat
 
+
 def calculer_frequences(frame, colonnes, minimum=1, maximum=99):
     colonnes = [c for c in colonnes if c in frame.columns]
 
@@ -100,6 +101,8 @@ def calculer_frequences(frame, colonnes, minimum=1, maximum=99):
         )
 
     donnees = frame[colonnes].apply(pd.to_numeric, errors="coerce")
+
+    # Supprimer les cellules vides avant toute conversion en entier.
     valeurs = donnees.stack().dropna()
     valeurs = valeurs[ valeurs.map(math.isfinite) ]
     valeurs = valeurs[valeurs % 1 == 0]
@@ -122,8 +125,6 @@ def calculer_frequences(frame, colonnes, minimum=1, maximum=99):
     ).round(3)
 
     return result
-
-
 
 def calculer_frequences(
     frame, colonnes, minimum=1, maximum=99
