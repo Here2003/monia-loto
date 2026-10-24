@@ -1,11 +1,11 @@
 import io
 import math
-import random
 import re
 import zipfile
 import itertools
 from collections import Counter
 
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
@@ -736,139 +736,293 @@ with onglets[5]:
 st.divider()
 
 # --------------------------------------------------
-# Générateur de grilles
+# Générateur de grilles Néréon (un seul générateur)
 # --------------------------------------------------
 
-def tirer_depuis_pool(classement, pool_taille, nombre, maximum):
-    """Tire `nombre` numéros distincts parmi les `pool_taille` premiers."""
-    if classement is None or classement.empty:
-        return sorted(random.sample(range(1, maximum + 1), nombre))
-    pool = [
-        int(n) for n in classement["Numéro"].tolist() if 1 <= int(n) <= maximum
-    ][:pool_taille]
-    if len(pool) < nombre:
-        pool = list(range(1, maximum + 1))
-    return sorted(random.sample(pool, nombre))
+def matrice_tirages(df, colonnes, nb, maximum):
+    """
+    Matrice (tirages × numéros) de 0/1, dans l'ordre chronologique.
+    Ne garde que les tirages complets et conformes aux règles actuelles.
+    """
+    if df is None or not colonnes:
+        return None
+
+    bloc = df[colonnes].apply(pd.to_numeric, errors="coerce")
+    lignes = []
+    for ligne in bloc.itertuples(index=False):
+        valeurs = {
+            int(v) for v in ligne
+            if pd.notna(v) and float(v).is_integer() and 1 <= v <= maximum
+        }
+        if len(valeurs) == nb:
+            lignes.append(valeurs)
+
+    if not lignes:
+        return None
+
+    m = np.zeros((len(lignes), maximum), dtype=np.int32)
+    for i, valeurs in enumerate(lignes):
+        for v in valeurs:
+            m[i, v - 1] = 1
+    return m
 
 
-def generer_grille(methode, regle, stats_num, stats_bonus,
-                   retards_num, retards_bonus):
-    nb_num, max_num = regle["nb_num"], regle["max_num"]
-    nb_bonus, max_bonus = regle["nb_bonus"], regle["max_bonus"]
-
-    if methode == "Aléatoire":
-        numeros = sorted(random.sample(range(1, max_num + 1), nb_num))
-        bonus = sorted(random.sample(range(1, max_bonus + 1), nb_bonus))
-
-    elif methode == "Équilibrée (pairs/impairs)":
-        while True:
-            numeros = sorted(random.sample(range(1, max_num + 1), nb_num))
-            pairs = sum(n % 2 == 0 for n in numeros)
-            if 2 <= pairs <= 3:
-                break
-        bonus = sorted(random.sample(range(1, max_bonus + 1), nb_bonus))
-
-    elif methode == "Fréquence":
-        numeros = tirer_depuis_pool(stats_num, 15, nb_num, max_num)
-        bonus = tirer_depuis_pool(stats_bonus, max(nb_bonus + 3, 5),
-                                  nb_bonus, max_bonus)
-
-    else:  # Retard
-        numeros = tirer_depuis_pool(retards_num, 15, nb_num, max_num)
-        bonus = tirer_depuis_pool(retards_bonus, max(nb_bonus + 3, 5),
-                                  nb_bonus, max_bonus)
-
-    return numeros, bonus
+def rang_normalise(x):
+    """Rang de chaque élément ramené entre 0 et 1."""
+    if len(x) < 2:
+        return np.zeros(len(x))
+    return np.asarray(x).argsort().argsort() / (len(x) - 1)
 
 
-with st.expander(f"🧠 Générateur de grilles {jeu}", expanded=True):
+def poids_statistiques(freq, recent, retard, poids):
+    """Distribution de probabilité de tirage issue des 3 analyses."""
+    w_f, w_r, w_t = poids
+    total_w = w_f + w_r + w_t
+    if total_w <= 0:
+        return np.full(len(freq), 1 / len(freq))
+    score = (
+        w_f * rang_normalise(freq)
+        + w_r * rang_normalise(recent)
+        + w_t * rang_normalise(retard)
+    ) / total_w
+    score = score + 0.05
+    return score / score.sum()
+
+
+def composantes(m, fenetre):
+    """Fréquence globale, fréquence récente et retard de chaque numéro."""
+    n_t = m.shape[0]
+    freq = m.sum(axis=0).astype(float)
+    recent = m[-fenetre:].sum(axis=0).astype(float)
+    inverse = m[::-1] > 0
+    retard = np.where(inverse.any(axis=0), inverse.argmax(axis=0), n_t)
+    return freq, recent, retard.astype(float)
+
+
+def melanger_avec_hasard(p_stat, alea):
+    """alea = 0 : statistiques seules · alea = 1 : hasard pur."""
+    p = (1 - alea) * p_stat + alea / len(p_stat)
+    return p / p.sum()
+
+
+def tirer_grille(p, nb, rng):
+    """Tire nb numéros distincts selon la distribution p."""
+    return sorted(int(n) + 1 for n in rng.choice(len(p), size=nb,
+                                                 replace=False, p=p))
+
+
+def test_uniformite(m, simulations=2000, graine=0):
+    """
+    Les fréquences observées s'écartent-elles de ce que donnerait le hasard ?
+    p-valeur par simulation (approximation : tirages indépendants).
+    """
+    n = m.shape[1]
+    observe = m.sum(axis=0)
+    total = int(observe.sum())
+    attendu = total / n
+    chi2 = float(((observe - attendu) ** 2 / attendu).sum())
+
+    rng = np.random.default_rng(graine)
+    simules = rng.multinomial(total, [1 / n] * n, size=simulations)
+    chi2_sim = ((simules - attendu) ** 2 / attendu).sum(axis=1)
+    p_valeur = (int((chi2_sim >= chi2).sum()) + 1) / (simulations + 1)
+    return chi2, p_valeur
+
+
+def backtest(m, fenetre, poids, nb, tirages_test=300):
+    """
+    Rejoue le passé : à chaque tirage, la méthode (statistiques seules, sans
+    hasard) choisit ses numéros avec les données antérieures uniquement.
+    Compare le nombre moyen de bons numéros au hasard pur.
+    """
+    n_t, n = m.shape
+    debut = max(fenetre + 1, n_t - tirages_test, 30)
+    if n_t - debut < 30:
+        return None
+
+    cumul = np.vstack([np.zeros((1, n)), np.cumsum(m, axis=0)])
+    derniere = np.full(n, -1)
+    touches = []
+
+    for t in range(n_t):
+        if t >= debut:
+            freq = cumul[t]
+            recent = cumul[t] - cumul[max(0, t - fenetre)]
+            retard = np.where(derniere >= 0, t - 1 - derniere, t)
+            p = poids_statistiques(freq, recent, retard, poids)
+            choix = np.argsort(-p, kind="stable")[:nb]
+            touches.append(int(m[t, choix].sum()))
+        derniere[m[t] > 0] = t
+
+    touches = np.array(touches)
+    k = len(touches)
+    esperance = nb * nb / n
+    variance = nb * (nb / n) * (1 - nb / n) * (n - nb) / (n - 1)
+    erreur = math.sqrt(variance / k)
+    moyenne = float(touches.mean())
+    return {
+        "tirages": k,
+        "moyenne": moyenne,
+        "hasard": esperance,
+        "z": (moyenne - esperance) / erreur if erreur > 0 else 0.0,
+    }
+
+
+with st.expander(f"🧠 Générateur de grilles Néréon — {jeu}", expanded=True):
     st.write(
-        "MonIA peut générer des grilles et expliquer les critères "
-        "statistiques utilisés. Aucune méthode ne prédit un tirage."
+        "Néréon calcule d'abord les statistiques de l'archive (fréquence "
+        "globale, fréquence récente, retard), les teste contre le hasard, "
+        "puis tire des grilles en favorisant les numéros les mieux classés. "
+        "Le curseur « part du hasard » règle le mélange entre statistiques "
+        "et tirage aléatoire."
     )
 
-    nombre_grilles = st.slider(
-        "Nombre de grilles à générer",
-        min_value=1,
-        max_value=10,
-        value=3,
-        key="nombre_grilles",
+    colonnes_gen = st.session_state.get("colonnes_numeros", [])
+    colonnes_gen_bonus = st.session_state.get("colonnes_bonus", [])
+
+    g1, g2, g3 = st.columns(3)
+    nombre_grilles = st.slider("Nombre de grilles", 1, 10, 3, key="gen_nb")
+    part_hasard = g2.slider(
+        "Part du hasard (%)", 0, 100, 50, key="gen_alea",
+        help="0 % = on suit uniquement les statistiques · "
+             "100 % = tirage purement aléatoire",
+    )
+    fenetre = g3.slider(
+        "Fenêtre « récente » (tirages)", 20, 500, 100, key="gen_fenetre"
     )
 
-    methode = st.selectbox(
-        "Méthode de génération",
-        [
-            "Aléatoire",
-            "Équilibrée (pairs/impairs)",
-            "Fréquence",
-            "Retard",
-        ],
-        key="methode_generation",
-    )
+    with st.expander("Réglages avancés : poids des analyses"):
+        w_f = st.slider("Fréquence globale", 0.0, 2.0, 1.0, 0.1, key="w_f")
+        w_r = st.slider("Fréquence récente", 0.0, 2.0, 1.0, 0.1, key="w_r")
+        w_t = st.slider("Retard", 0.0, 2.0, 1.0, 0.1, key="w_t")
 
-    if st.button("🎯 Générer mes grilles", key="generer_grilles"):
-        cols_num = st.session_state.get("colonnes_numeros", [])
-        cols_bonus = st.session_state.get("colonnes_bonus", [])
-
-        if methode in ("Fréquence", "Retard") and (df is None or not cols_num):
+    if st.button("🎯 Analyser et générer", key="gen_bouton"):
+        if df is None or not colonnes_gen:
             st.error(
-                "Cette méthode a besoin des archives et des colonnes de "
-                "numéros (onglet Fréquences). Utilise « Aléatoire » sinon."
+                "Importe les archives et vérifie les colonnes de numéros "
+                "dans l'onglet Fréquences avant de générer."
             )
         else:
-            stats_num = calculer_frequences(
-                df, cols_num, regle["max_num"]
+            m_num = matrice_tirages(
+                df, colonnes_gen, regle["nb_num"], regle["max_num"]
             )
-            stats_bonus = calculer_frequences(
-                df, cols_bonus, regle["max_bonus"]
-            )
-            retards_num = calculer_retards(
-                df, cols_num, regle["max_num"]
-            )
-            retards_bonus = calculer_retards(
-                df, cols_bonus, regle["max_bonus"]
-            )
-
-            for i in range(1, nombre_grilles + 1):
-                numeros, bonus = generer_grille(
-                    methode, regle, stats_num, stats_bonus,
-                    retards_num, retards_bonus,
+            if m_num is None or len(m_num) < 50:
+                st.error(
+                    "Pas assez de tirages complets conformes aux règles "
+                    f"actuelles ({regle['nb_num']} numéros entre 1 et "
+                    f"{regle['max_num']}). Vérifie le jeu et les colonnes."
                 )
-                st.markdown(f"### Grille {i}")
-                c1, c2 = st.columns([5, 2])
-                c1.write("**Numéros** : " + " · ".join(map(str, numeros)))
-                c2.write(
-                    f"**{regle['nom_bonus']}** : "
-                    + " · ".join(map(str, bonus))
+            else:
+                poids = (w_f, w_r, w_t)
+                alea = part_hasard / 100
+
+                st.write("#### 1. Ce que disent les statistiques")
+                st.write(
+                    f"{len(m_num):,} tirages complets analysés "
+                    f"(sur {len(df):,} lignes)."
                 )
 
-                if methode == "Fréquence" and stats_num is not None:
-                    occ = {
-                        int(r["Numéro"]): int(r["Occurrences"])
-                        for _, r in stats_num.iterrows()
-                    }
-                    st.caption(
-                        "Numéros tirés parmi les 15 plus fréquents. "
-                        "Occurrences : "
-                        + ", ".join(f"{n}→{occ.get(n, 0)}" for n in numeros)
+                chi2, p_val = test_uniformite(m_num)
+                if p_val < 0.05:
+                    st.write(
+                        f"**Test d'uniformité** : écart notable avec le "
+                        f"hasard pur (p = {p_val:.3f}). Il peut venir de "
+                        "changements de règles ou d'un mélange d'archives ; "
+                        "à vérifier avant d'y voir un signal."
                     )
-                elif methode == "Retard" and retards_num is not None:
-                    ret = {
-                        int(r["Numéro"]): int(r["Retard (tirages)"])
-                        for _, r in retards_num.iterrows()
-                    }
-                    st.caption(
-                        "Numéros tirés parmi les 15 plus en retard. "
-                        "Retards (tirages) : "
-                        + ", ".join(f"{n}→{ret.get(n, 0)}" for n in numeros)
+                else:
+                    st.write(
+                        f"**Test d'uniformité** : les fréquences sont "
+                        f"compatibles avec le hasard pur (p = {p_val:.3f}). "
+                        "Aucun numéro n'est statistiquement favorisé."
                     )
 
-            st.info(
-                "Toutes ces grilles sont valides et ont exactement la même "
-                "probabilité de sortir. Les critères (fréquence, retard, "
-                "équilibre pair/impair) décrivent le passé ou la "
-                "présentation : ils ne donnent aucun avantage démontré."
-            )
+                bt = backtest(m_num, fenetre, poids, regle["nb_num"])
+                if bt is not None:
+                    st.write(
+                        f"**Test sur le passé** ({bt['tirages']} derniers "
+                        f"tirages, sans regarder le futur) : la méthode "
+                        f"obtient en moyenne {bt['moyenne']:.3f} bons "
+                        f"numéros par tirage contre {bt['hasard']:.3f} pour "
+                        f"une grille au hasard (écart : {bt['z']:+.2f} "
+                        "écart-type)."
+                    )
+                    if abs(bt["z"]) < 2:
+                        st.caption(
+                            "L'écart n'est pas significatif : la méthode ne "
+                            "fait pas mieux que le hasard sur cet historique."
+                        )
+                    elif bt["z"] >= 2:
+                        st.caption(
+                            "Écart significatif sur l'historique, mais "
+                            "méfie-toi : tester beaucoup de réglages produit "
+                            "de faux positifs."
+                        )
+
+                freq, recent, retard = composantes(m_num, fenetre)
+                p_num = melanger_avec_hasard(
+                    poids_statistiques(freq, recent, retard, poids), alea
+                )
+
+                m_bonus = matrice_tirages(
+                    df, colonnes_gen_bonus,
+                    regle["nb_bonus"], regle["max_bonus"],
+                ) if colonnes_gen_bonus else None
+                if m_bonus is not None and len(m_bonus) >= 50:
+                    fb, rb, tb = composantes(m_bonus, fenetre)
+                    p_bonus = melanger_avec_hasard(
+                        poids_statistiques(fb, rb, tb, poids), alea
+                    )
+                else:
+                    p_bonus = np.full(
+                        regle["max_bonus"], 1 / regle["max_bonus"]
+                    )
+                    st.caption(
+                        f"{regle['nom_bonus']} : colonnes non sélectionnées "
+                        "ou insuffisantes, tirage aléatoire."
+                    )
+
+                st.write("#### 2. Grilles proposées")
+                rng = np.random.default_rng()
+                vues = set()
+                essais = 0
+                while len(vues) < nombre_grilles and essais < 500:
+                    essais += 1
+                    numeros = tirer_grille(p_num, regle["nb_num"], rng)
+                    bonus = tirer_grille(p_bonus, regle["nb_bonus"], rng)
+                    cle = (tuple(numeros), tuple(bonus))
+                    if cle in vues:
+                        continue
+                    vues.add(cle)
+                    st.markdown(f"**Grille {len(vues)}**")
+                    c1, c2 = st.columns([5, 2])
+                    c1.write("Numéros : " + " · ".join(map(str, numeros)))
+                    c2.write(
+                        f"{regle['nom_bonus']} : "
+                        + " · ".join(map(str, bonus))
+                    )
+
+                classement = (
+                    pd.DataFrame({
+                        "Numéro": np.arange(1, regle["max_num"] + 1),
+                        "Occurrences": freq.astype(int),
+                        f"Occurrences ({fenetre} derniers)": recent.astype(int),
+                        "Retard (tirages)": retard.astype(int),
+                        "Poids de tirage (%)": (p_num * 100).round(2),
+                    })
+                    .sort_values("Poids de tirage (%)", ascending=False)
+                    .reset_index(drop=True)
+                )
+                with st.expander("Détail : poids de chaque numéro"):
+                    tableau(classement, hide_index=True)
+
+                st.info(
+                    "Ces grilles sont celles que les statistiques "
+                    "privilégient, pas des grilles plus probables : au "
+                    "tirage, toute combinaison valide a exactement la même "
+                    "chance de sortir. Plus la part du hasard est élevée, "
+                    "plus la grille ressemble à un tirage aléatoire."
+                )
 
 st.caption(
     "MonIA — outil d'analyse descriptive. Les résultats dépendent de la "
