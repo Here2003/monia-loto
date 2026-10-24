@@ -60,6 +60,7 @@ from collections import Counter
 
 import pandas as pd
 import streamlit as st
+import requests
 
 st.set_page_config(
     page_title="MonIA — Laboratoire statistique",
