@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 import streamlit as st
 
 INSTRUCTIONS_NEREON = """
-Tu es Néréon, le cerveau scientifique de toute la France
+Tu es Néréon, le cerveau scientifique de MonIA.
 
 MISSION
 Tu analyses les archives historiques du Loto français et d’EuroMillions,
@@ -22,8 +22,7 @@ les triplets, les nombres de gagnants et les montants des gains publiés.
 RIGUEUR SCIENTIFIQUE
 - Utilise uniquement des données réellement disponibles et vérifiées.
 - Privilégie les sources officielles de la FDJ et des loteries nationales.
-- Sépare les numéros principaux, les étoiles et le numéro Chance.a 
-- Regarde si des boules sortent plus souvent peut etre du leur poid différent.
+- Sépare les numéros principaux, les étoiles et le numéro Chance.
 - Explique les calculs, les périodes étudiées et les limites des données.
 - Ne fabrique jamais de résultats, de sources ou de statistiques.
 - Ne prétends jamais avoir consulté Internet si tu ne l'as pas fait.
@@ -43,11 +42,9 @@ GAINS ET GAGNANTS
 - N'invente jamais l'identité ou les habitudes des gagnants.
 
 RECHERCHE
-- Utilise uniquement tous les outils réellement disponibles dans l'application et dans le monde si tu en as besoin.
-- Tu as un accés total a tous les serveurs et fichiers.
+- Utilise uniquement les outils réellement disponibles dans l'application.
 - Vérifie les sources, les dates et les données avant de conclure.
-- Mets toi tout le temps à jour pour donner de bonnes réponses.
-- Ne ment jamais.
+- Respecte les conditions d'utilisation des sites consultés.
 
 RÉPONSES
 Réponds toujours en français, clairement et avec méthode :
@@ -461,6 +458,7 @@ onglets = st.tabs([
     "🎯 Probabilités",
     "📂 Archives",
     "🎯 Générateur",
+    "🔬 Équité de la machine",
 ])
 
 regle = REGLES[jeu]
@@ -850,24 +848,6 @@ def tirer_grille(p, nb, rng):
                                                  replace=False, p=p))
 
 
-def test_uniformite(m, simulations=2000, graine=0):
-    """
-    Les fréquences observées s'écartent-elles de ce que donnerait le hasard ?
-    p-valeur par simulation (approximation : tirages indépendants).
-    """
-    n = m.shape[1]
-    observe = m.sum(axis=0)
-    total = int(observe.sum())
-    attendu = total / n
-    chi2 = float(((observe - attendu) ** 2 / attendu).sum())
-
-    rng = np.random.default_rng(graine)
-    simules = rng.multinomial(total, [1 / n] * n, size=simulations)
-    chi2_sim = ((simules - attendu) ** 2 / attendu).sum(axis=1)
-    p_valeur = (int((chi2_sim >= chi2).sum()) + 1) / (simulations + 1)
-    return chi2, p_valeur
-
-
 def backtest(m, fenetre, poids, nb, tirages_test=300):
     """
     Rejoue le passé : à chaque tirage, la méthode (statistiques seules, sans
@@ -904,6 +884,302 @@ def backtest(m, fenetre, poids, nb, tirages_test=300):
         "moyenne": moyenne,
         "hasard": esperance,
         "z": (moyenne - esperance) / erreur if erreur > 0 else 0.0,
+    }
+
+
+# --------------------------------------------------
+# Équité de la machine : le tirage est-il vraiment aléatoire ?
+# --------------------------------------------------
+
+from statistics import NormalDist
+
+
+def p_normale(z):
+    """p-valeur bilatérale d'un écart de z écarts-types."""
+    return math.erfc(abs(float(z)) / math.sqrt(2))
+
+
+def p_chi2(statistique, ddl, sims=200000, graine=0):
+    """p-valeur d'un khi-deux par simulation (sans dépendance externe)."""
+    rng = np.random.default_rng(graine)
+    simule = rng.chisquare(ddl, sims)
+    return (int((simule >= statistique).sum()) + 1) / (sims + 1)
+
+
+def stat_uniformite(compte, n_tirages, p0):
+    """
+    Statistique d'uniformité corrigée du tirage sans remise dans un même
+    tirage : suit un khi-deux à (nb de numéros − 1) degrés de liberté si
+    toutes les boules ont la même chance.
+    """
+    attendu = n_tirages * p0
+    mx = len(compte)
+    # Dans un tirage sans remise, les comptes sont liés entre eux : leur
+    # variance sur les mx − 1 directions libres est multipliée par mx/(mx − 1).
+    return float(((compte - attendu) ** 2).sum()
+                 / (n_tirages * p0 * (1 - p0) * mx / (mx - 1)))
+
+
+def test_uniformite(m, simulations=2000, graine=0):
+    """Les fréquences observées s'écartent-elles du hasard pur ?"""
+    n_t, n = m.shape
+    nb = int(m[0].sum())
+    T = stat_uniformite(m.sum(axis=0), n_t, nb / n)
+    return T, p_chi2(T, n - 1, graine=graine)
+
+
+def parser_dates(serie):
+    brut = serie.astype(str).str.strip()
+    d = pd.to_datetime(brut, format="%d/%m/%Y", errors="coerce")
+    reste = d.isna()
+    if reste.any():
+        d = d.fillna(pd.to_datetime(brut.where(reste), format="%Y%m%d",
+                                    errors="coerce"))
+    reste = d.isna()
+    if reste.any():
+        d = d.fillna(pd.to_datetime(brut.where(reste), dayfirst=True,
+                                    errors="coerce"))
+    return d
+
+
+def preparer_tirages(df, colonnes, nb, maximum):
+    """
+    Renvoie la matrice des tirages, l'ordre d'extraction tel que l'archive
+    le donne et la position des lignes retenues dans df.
+    """
+    if df is None or not colonnes:
+        return None
+    colonnes = [c for c in df.columns if c in set(colonnes)]
+    bloc = df[colonnes].apply(pd.to_numeric, errors="coerce")
+    ordres, indices = [], []
+    for pos, ligne in enumerate(bloc.itertuples(index=False)):
+        valeurs = [
+            int(v) for v in ligne
+            if pd.notna(v) and float(v).is_integer() and 1 <= v <= maximum
+        ]
+        if len(valeurs) == nb and len(set(valeurs)) == nb:
+            ordres.append(valeurs)
+            indices.append(pos)
+    if not ordres:
+        return None
+    ordre = np.array(ordres, dtype=np.int32)
+    m = np.zeros((len(ordre), maximum), dtype=np.int32)
+    m[np.repeat(np.arange(len(ordre)), nb), (ordre - 1).ravel()] = 1
+    return {"m": m, "ordre": ordre, "idx": np.array(indices)}
+
+
+@st.cache_data(show_spinner="Néréon teste l'équité de la machine…")
+def analyser_equite(m, nb, mx, ordre, jours, n_blocs=6):
+    """Batterie de tests : H0 = toutes les boules ont la même chance."""
+    n_t = m.shape[0]
+    p0 = nb / mx
+    sd = math.sqrt(n_t * p0 * (1 - p0))
+    compte = m.sum(axis=0).astype(float)
+    tests = []
+
+    # 1. Uniformité globale
+    T = stat_uniformite(compte, n_t, p0)
+    p_glob = p_chi2(T, mx - 1)
+    tests.append({
+        "Test": "Fréquences globales",
+        "Ce qu'il cherche": "des numéros qui sortent trop ou pas assez",
+        "p": p_glob,
+    })
+
+    # 2. Numéro par numéro
+    z_num = (compte - n_t * p0) / sd
+    p_num = min(1.0, mx * p_normale(np.abs(z_num).max()))
+    tests.append({
+        "Test": "Numéro par numéro",
+        "Ce qu'il cherche": "une boule précise favorisée ou défavorisée",
+        "p": p_num,
+    })
+
+    # 3. Dépendance entre tirages successifs
+    esperance = nb * nb / mx
+    variance = nb * p0 * (1 - p0) * (mx - nb) / (mx - 1)
+    z_lags = []
+    for lag in range(1, 11):
+        if n_t - lag < 50:
+            break
+        recouvrement = (m[:-lag] * m[lag:]).sum(axis=1)
+        z_lags.append((
+            lag,
+            (recouvrement.mean() - esperance)
+            / math.sqrt(variance / (n_t - lag)),
+        ))
+    if z_lags:
+        p_lag = min(1.0, len(z_lags) * p_normale(
+            max(abs(z) for _, z in z_lags)))
+        tests.append({
+            "Test": "Mémoire entre tirages",
+            "Ce qu'il cherche":
+                "des numéros qui reviennent (ou évitent de revenir) "
+                "d'un tirage à l'autre, jusqu'à 10 tirages d'écart",
+            "p": p_lag,
+        })
+
+    # 4. Dérive dans le temps (changement de boules, usure, machine)
+    n_blocs = max(1, min(n_blocs, n_t // 150))
+    taille = n_t // n_blocs
+    blocs = []
+    for b in range(n_blocs):
+        debut = b * taille
+        fin = (b + 1) * taille if b < n_blocs - 1 else n_t
+        mb = m[debut:fin]
+        Tb = stat_uniformite(mb.sum(axis=0), len(mb), p0)
+        blocs.append({
+            "debut": debut, "fin": fin, "n": len(mb), "T": Tb,
+            "p": p_chi2(Tb, mx - 1, sims=50000, graine=b + 1),
+        })
+    tests.append({
+        "Test": "Stabilité dans le temps",
+        "Ce qu'il cherche":
+            "un biais qui apparaît sur une période (boules changées, usure)",
+        "p": min(1.0, n_blocs * min(b["p"] for b in blocs)),
+    })
+
+    # 5. Effet du jour de tirage
+    groupes = []
+    if jours is not None:
+        jours = np.asarray(jours)
+        for j in sorted(set(jours.tolist())):
+            sel = jours == j
+            if sel.sum() >= 100:
+                Tj = stat_uniformite(m[sel].sum(axis=0), int(sel.sum()), p0)
+                groupes.append({
+                    "Jour": j, "Tirages": int(sel.sum()), "T": Tj,
+                    "p": p_chi2(Tj, mx - 1, sims=50000, graine=99),
+                })
+        if groupes:
+            tests.append({
+                "Test": "Jour de tirage",
+                "Ce qu'il cherche": "un biais propre à un jour",
+                "p": min(1.0, len(groupes) * min(g["p"] for g in groupes)),
+            })
+
+    # 6. Ordre d'extraction (masse, rebond : certaines boules sortent-elles
+    #    plus tôt ?). Possible seulement si l'archive garde l'ordre.
+    position = None
+    part_triee = None
+    if ordre is not None and nb >= 2:
+        part_triee = float((np.diff(ordre, axis=1) > 0).all(axis=1).mean())
+        if part_triee < 0.95:
+            cnt = np.bincount((ordre - 1).ravel(), minlength=mx).astype(float)
+            som = np.bincount(
+                (ordre - 1).ravel(),
+                weights=np.tile(np.arange(1, nb + 1), len(ordre)),
+                minlength=mx,
+            )
+            moy = np.where(cnt > 0, som / np.maximum(cnt, 1), (nb + 1) / 2)
+            var_pos = (nb * nb - 1) / 12
+            z_pos = (moy - (nb + 1) / 2) / np.sqrt(
+                var_pos / np.maximum(cnt, 1))
+            p_pos = min(1.0, mx * p_normale(np.abs(z_pos).max()))
+            position = {"z": z_pos, "moy": moy, "p": p_pos}
+            tests.append({
+                "Test": "Ordre de sortie des boules",
+                "Ce qu'il cherche":
+                    "des boules qui sortent systématiquement plus tôt ou "
+                    "plus tard dans le tirage",
+                "p": p_pos,
+            })
+
+    # 7. Estimation du biais (rétrécissement de James-Stein, corrigé du bruit)
+    q = compte / n_t
+    d = q - p0
+    S = float((d ** 2).sum())
+    sigma2 = p0 * (1 - p0) / n_t
+    lam = max(0.0, 1 - (mx - 3) * sigma2 / S) if S > 0 else 0.0
+    # Plusieurs tests à la fois : on multiplie par leur nombre (Bonferroni),
+    # sinon une fausse alerte devient bien plus fréquente que annoncé.
+    p_min = min(1.0, len(tests) * min(t["p"] for t in tests))
+    biais_frequences = min(1.0, len(tests) * min(p_glob, p_num)) < 0.01
+    q_hat = p0 + lam * d if biais_frequences else np.full(mx, p0)
+
+    return {
+        "n_tirages": n_t, "p0": p0, "tests": tests, "z_num": z_num,
+        "compte": compte, "z_lags": z_lags, "blocs": blocs,
+        "groupes": groupes, "position": position, "part_triee": part_triee,
+        "lam": lam, "q_hat": q_hat, "p_min": p_min,
+        "biais_frequences": biais_frequences,
+        "biais_detecte": p_min < 0.01,
+    }
+
+
+@st.cache_data(show_spinner="Néréon simule des machines biaisées…")
+def puissance_biais(n_t, nb, mx, sims=60, graine=1):
+    """
+    Si 5 boules avaient un poids (1 + δ) dans la machine (modèle de
+    Plackett-Luce : à chaque extraction, chance proportionnelle au poids),
+    nos tests le détecteraient-ils avec n_t tirages ?
+    """
+    rng = np.random.default_rng(graine)
+    p0 = nb / mx
+    sd = math.sqrt(n_t * p0 * (1 - p0))
+    z_crit = NormalDist().inv_cdf(1 - 0.025 / mx)
+    chi2_crit = float(np.percentile(rng.chisquare(mx - 1, 200000), 95))
+    lignes = []
+    for delta in (0.02, 0.05, 0.10, 0.20, 0.50):
+        w = np.ones(mx)
+        w[:5] = 1 + delta
+        detections = 0
+        for _ in range(sims):
+            cles = np.log(w) + rng.gumbel(size=(n_t, mx))
+            haut = np.argpartition(-cles, nb - 1, axis=1)[:, :nb]
+            comptes = np.bincount(haut.ravel(), minlength=mx)
+            T = stat_uniformite(comptes, n_t, p0)
+            z = (comptes - n_t * p0) / sd
+            if T >= chi2_crit or np.abs(z).max() >= z_crit:
+                detections += 1
+        lignes.append({
+            "Poids des 5 boules biaisées": f"+{int(delta * 100)} %",
+            "Chance de détection": f"{detections / sims:.0%}",
+            "_p": detections / sims,
+        })
+    return pd.DataFrame(lignes)
+
+
+def verdict_p(p):
+    if p >= 0.05:
+        return "compatible avec le hasard"
+    if p >= 0.01:
+        return "signal faible, à confirmer"
+    return "écart détecté"
+
+
+@st.cache_data(show_spinner="Néréon cherche des traces de manipulation…")
+def analyser_truquage(m, nb, mx, graine=0):
+    """
+    Traces qu'un truquage maladroit laisserait dans les résultats publiés :
+    des fréquences trop régulières pour être honnêtes (résultats fabriqués
+    ou lissés) et des paires de numéros qui sortent ensemble anormalement.
+    """
+    n_t = m.shape[0]
+    p0 = nb / mx
+    T = stat_uniformite(m.sum(axis=0), n_t, p0)
+    simule = np.random.default_rng(graine).chisquare(mx - 1, 200000)
+    p_regulier = (int((simule <= T).sum()) + 1) / (len(simule) + 1)
+
+    co = m.T.astype(float) @ m.astype(float)
+    p_paire = nb * (nb - 1) / (mx * (mx - 1))
+    attendu = n_t * p_paire
+    sd = math.sqrt(n_t * p_paire * (1 - p_paire))
+    i, j = np.triu_indices(mx, 1)
+    z = (co[i, j] - attendu) / sd
+    seuil = NormalDist().inv_cdf(1 - 0.025 / len(z))
+    ordre = np.argsort(-np.abs(z))[:5]
+    return {
+        "p_regulier": p_regulier,
+        "n_paires": int(len(z)),
+        "n_paires_anormales": int((np.abs(z) >= seuil).sum()),
+        "seuil_z": seuil,
+        "top": pd.DataFrame({
+            "Paire": [f"{i[k] + 1} – {j[k] + 1}" for k in ordre],
+            "Sorties ensemble": [int(co[i[k], j[k]]) for k in ordre],
+            "Attendu": round(attendu, 1),
+            "Écart (écarts-types)": [round(float(z[k]), 2) for k in ordre],
+        }),
     }
 
 
@@ -1162,6 +1438,20 @@ with onglets[6]:
             freq, recent, retard = composantes(m_num, fenetre)
             p_stat = poids_statistiques(freq, recent, retard, poids)
             p_num = melanger_avec_hasard(p_stat, alea)
+            eq_rapide = analyser_equite(
+                m_num, regle["nb_num"], regle["max_num"], None, None
+            )
+            if eq_rapide["biais_frequences"]:
+                q = eq_rapide["q_hat"]
+                p_stat = q / q.sum()
+                if auto:
+                    alea = 0.3
+                p_num = melanger_avec_hasard(p_stat, alea)
+                st.success(
+                    "Le test d'équité (onglet 🔬) détecte un écart de "
+                    "fréquence par rapport au hasard pur. Néréon pondère "
+                    "les numéros avec l'écart estimé et corrigé du bruit."
+                )
             rang_num = rang_normalise(p_stat) * 100
 
             if m_bonus is not None:
@@ -1233,3 +1523,304 @@ with onglets[6]:
                     .reset_index(drop=True)
                 )
                 tableau(classement, hide_index=True)
+
+
+with onglets[7]:
+    st.header("🔬 Équité de la machine à boules")
+    st.write(
+        "Hypothèse de départ : la machine est parfaitement équitable, donc "
+        "chaque boule a la même chance à chaque extraction. Néréon cherche "
+        "tout ce qui contredirait cette hypothèse : fréquences, mémoire "
+        "entre tirages, dérive dans le temps, jour de tirage, ordre de "
+        "sortie des boules. Si rien ne la contredit, c'est du hasard. Si "
+        "quelque chose la contredit, il estime l'écart."
+    )
+
+    if df is None:
+        st.info("Aucune archive disponible.")
+    else:
+        auto_n, auto_b = detecter_colonnes_jeu(df)
+        cols_n = st.session_state.get(cle_num) or auto_n
+        cols_b = st.session_state.get(cle_bonus) or auto_b
+        prep = preparer_tirages(
+            df, cols_n, regle["nb_num"], regle["max_num"]
+        ) if cols_n else None
+
+        if prep is None or len(prep["m"]) < 150:
+            st.error(
+                "Pas assez de tirages complets conformes aux règles "
+                "actuelles pour tester l'équité (150 minimum)."
+            )
+        else:
+            m_eq, ordre_eq, idx_eq = prep["m"], prep["ordre"], prep["idx"]
+            nb_eq, mx_eq = regle["nb_num"], regle["max_num"]
+
+            dates_eq = None
+            if colonne_date:
+                dates_eq = parser_dates(df[colonne_date].iloc[idx_eq])
+            jours_eq = None
+            col_jour = next(
+                (c for c in df.columns
+                 if re.search(r"^jour", str(c), re.IGNORECASE)), None
+            )
+            if col_jour:
+                jours_eq = (
+                    df[col_jour].iloc[idx_eq].astype(str).str.strip()
+                    .str.upper().to_numpy()
+                )
+
+            eq = analyser_equite(m_eq, nb_eq, mx_eq, ordre_eq, jours_eq)
+
+            # ---------- Verdict ----------
+            st.subheader("Verdict")
+            n_fmt = f"{eq['n_tirages']:,}".replace(",", " ")
+            if eq["p_min"] >= 0.05:
+                st.success(
+                    f"Sur {n_fmt} tirages, aucun des tests ne contredit "
+                    "l'hypothèse d'une machine équitable. Les numéros "
+                    "sortent comme le ferait le hasard pur : il n'y a "
+                    "aucune faille détectable à exploiter."
+                )
+            elif eq["p_min"] >= 0.01:
+                st.warning(
+                    f"Sur {n_fmt} tirages, un test donne un signal faible "
+                    f"(p corrigée = {eq['p_min']:.3f}). Avec autant de tests, "
+                    "ça arrive par chance : à confirmer sur de nouveaux "
+                    "tirages avant d'y croire."
+                )
+            else:
+                st.error(
+                    f"Sur {n_fmt} tirages, au moins un test contredit "
+                    f"nettement le hasard pur (p corrigée = "
+                    f"{eq['p_min']:.4f}). Vérifie d'abord que les archives "
+                    "ne mélangent pas des règles ou des boules différentes, "
+                    "puis regarde le détail ci-dessous."
+                )
+
+            tableau(pd.DataFrame([
+                {
+                    "Test": t["Test"],
+                    "Ce qu'il cherche": t["Ce qu'il cherche"],
+                    "p-valeur corrigée": round(t["p"], 4),
+                    "Conclusion": verdict_p(t["p"]),
+                }
+                for t in eq["tests"]
+            ]), hide_index=True)
+            st.caption(
+                "La p-valeur corrigée est la probabilité d'observer un "
+                "écart au moins aussi grand si la machine était parfaite, "
+                "en tenant compte du nombre de comparaisons faites."
+            )
+
+            # ---------- Détails ----------
+            with st.expander("Détail numéro par numéro"):
+                z = pd.Series(eq["z_num"],
+                              index=np.arange(1, mx_eq + 1), name="Écart")
+                st.bar_chart(z)
+                seuil = NormalDist().inv_cdf(1 - 0.025 / mx_eq)
+                st.caption(
+                    f"Écart en écarts-types par rapport à l'attendu. Au-delà "
+                    f"de ±{seuil:.2f}, une boule serait anormale (seuil "
+                    "corrigé pour le nombre de boules testées)."
+                )
+                top = np.argsort(-np.abs(eq["z_num"]))[:10]
+                tableau(pd.DataFrame({
+                    "Numéro": top + 1,
+                    "Sorties": eq["compte"][top].astype(int),
+                    "Attendu": round(eq["n_tirages"] * eq["p0"], 1),
+                    "Écart (écarts-types)": eq["z_num"][top].round(2),
+                }), hide_index=True)
+
+            with st.expander("Détail : stabilité dans le temps"):
+                lignes = []
+                for b in eq["blocs"]:
+                    if dates_eq is not None and dates_eq.notna().any():
+                        d_b = dates_eq.iloc[b["debut"]:b["fin"]].dropna()
+                        periode = (
+                            f"{d_b.min():%m/%Y} – {d_b.max():%m/%Y}"
+                            if len(d_b) else "—"
+                        )
+                    else:
+                        periode = f"tirages {b['debut'] + 1}–{b['fin']}"
+                    lignes.append({
+                        "Période": periode, "Tirages": b["n"],
+                        "p-valeur": round(b["p"], 3),
+                        "Conclusion": verdict_p(
+                            min(1.0, len(eq["blocs"]) * b["p"])),
+                    })
+                tableau(pd.DataFrame(lignes), hide_index=True)
+
+            with st.expander("Détail : mémoire entre tirages"):
+                tableau(pd.DataFrame([
+                    {"Écart de tirages": lag,
+                     "Écart (écarts-types)": round(z, 2)}
+                    for lag, z in eq["z_lags"]
+                ]), hide_index=True)
+                st.caption(
+                    "Compare le nombre de numéros communs entre deux tirages "
+                    "à ce que donnerait le hasard."
+                )
+
+            if eq["groupes"]:
+                with st.expander("Détail : jour de tirage"):
+                    tableau(pd.DataFrame([
+                        {"Jour": g["Jour"], "Tirages": g["Tirages"],
+                         "p-valeur": round(g["p"], 3)}
+                        for g in eq["groupes"]
+                    ]), hide_index=True)
+
+            with st.expander("Détail : ordre de sortie des boules"):
+                if eq["position"] is not None:
+                    pos = eq["position"]
+                    ordre_z = np.argsort(-np.abs(pos["z"]))[:10]
+                    tableau(pd.DataFrame({
+                        "Numéro": ordre_z + 1,
+                        "Position moyenne": pos["moy"][ordre_z].round(2),
+                        "Position attendue": (nb_eq + 1) / 2,
+                        "Écart (écarts-types)": pos["z"][ordre_z].round(2),
+                    }), hide_index=True)
+                    st.caption(
+                        "Une boule plus lourde, plus rebondissante ou plus "
+                        "grosse sortirait en moyenne plus tôt ou plus tard "
+                        "que les autres."
+                    )
+                elif eq["part_triee"] is not None:
+                    st.info(
+                        "Cette archive range les numéros par ordre "
+                        "croissant : l'ordre réel d'extraction n'est pas "
+                        "conservé, ce test est impossible avec ces fichiers."
+                    )
+
+            if cols_b:
+                m_bon = matrice_tirages(
+                    df, cols_b, regle["nb_bonus"], regle["max_bonus"]
+                )
+                if m_bon is not None and len(m_bon) >= 150:
+                    eq_b = analyser_equite(
+                        m_bon, regle["nb_bonus"], regle["max_bonus"],
+                        None, None,
+                    )
+                    with st.expander(f"Détail : {regle['nom_bonus']}"):
+                        tableau(pd.DataFrame([
+                            {
+                                "Test": t["Test"],
+                                "p-valeur corrigée": round(t["p"], 4),
+                                "Conclusion": verdict_p(t["p"]),
+                            }
+                            for t in eq_b["tests"]
+                        ]), hide_index=True)
+
+            # ---------- Puissance ----------
+            st.subheader("Quel biais ces tests pourraient-ils voir ?")
+            st.write(
+                "Modèle de la machine : à chaque extraction, chaque boule "
+                "restante est tirée avec une chance proportionnelle à son "
+                "« poids » (masse, diamètre, rebond). Équitable = tous les "
+                "poids égaux. Néréon simule des machines où 5 boules ont un "
+                "poids un peu supérieur et regarde si ses tests le "
+                "verraient avec autant de tirages que ton archive."
+            )
+            puiss = puissance_biais(
+                min(eq["n_tirages"], 3000), nb_eq, mx_eq
+            )
+            tableau(puiss.drop(columns="_p"), hide_index=True)
+            detectables = puiss[puiss["_p"] >= 0.8]
+            if len(detectables):
+                st.caption(
+                    f"Avec {n_fmt} tirages, un biais de poids à partir de "
+                    f"{detectables.iloc[0]['Poids des 5 boules biaisées']} "
+                    "serait détecté dans au moins 80 % des cas. Un biais "
+                    "plus petit resterait invisible."
+                )
+            else:
+                st.caption(
+                    "Même un biais de +50 % serait souvent manqué avec "
+                    "cette quantité de tirages."
+                )
+
+            # ---------- Estimation ----------
+            st.subheader("Si ce n'est pas du hasard : estimation de l'écart")
+            if eq["biais_frequences"]:
+                q_hat = eq["q_hat"]
+                p0 = eq["p0"]
+                ordre_q = np.argsort(-q_hat)[:nb_eq]
+                rapport = float(np.prod(q_hat[ordre_q] / p0))
+                total_eq = math.comb(mx_eq, nb_eq)
+                st.write(
+                    "Estimation prudente (rétrécie vers le hasard pour ne "
+                    f"pas prendre le bruit pour un signal ; coefficient "
+                    f"{eq['lam']:.2f}) :"
+                )
+                tableau(pd.DataFrame({
+                    "Numéro": ordre_q + 1,
+                    "Chance estimée par tirage":
+                        (q_hat[ordre_q] * 100).round(2).astype(str) + " %",
+                    "Chance si équitable":
+                        f"{p0 * 100:.2f} %",
+                    "Rapport": (q_hat[ordre_q] / p0).round(3),
+                }), hide_index=True)
+                st.write(
+                    f"Pour la grille formée de ces {nb_eq} numéros, la "
+                    f"chance de sortir serait multipliée par environ "
+                    f"{rapport:.2f} (1 sur "
+                    f"{total_eq / rapport:,.0f}".replace(",", " ")
+                    + f" au lieu de 1 sur {total_eq:,}".replace(",", " ")
+                    + "), si cet écart est réel et stable."
+                )
+                st.caption(
+                    "Le générateur utilise cette estimation tant que le "
+                    "test reste significatif."
+                )
+            else:
+                st.write(
+                    "Aucun écart de fréquence significatif : la meilleure "
+                    "estimation de la chance de chaque boule est la chance "
+                    f"égale ({eq['p0'] * 100:.2f} % par tirage). Il n'y a "
+                    "rien à calculer de plus : calculer le hasard, c'est "
+                    "précisément constater qu'aucune boule n'est favorisée."
+                )
+
+            # ---------- Hypothèse « truqué » ----------
+            st.subheader("Et si c'était truqué ?")
+            tr = analyser_truquage(m_eq, nb_eq, mx_eq)
+            memoire = next(
+                (t["p"] for t in eq["tests"]
+                 if t["Test"] == "Mémoire entre tirages"), None
+            )
+            lignes_tr = [{
+                "Trace cherchée": "résultats trop réguliers pour du hasard",
+                "p": round(tr["p_regulier"], 4),
+                "Conclusion": verdict_p(tr["p_regulier"]),
+            }]
+            if memoire is not None:
+                lignes_tr.append({
+                    "Trace cherchée":
+                        "tirage lié aux tirages précédents (répétition ou "
+                        "évitement)",
+                    "p": round(memoire, 4),
+                    "Conclusion": verdict_p(memoire),
+                })
+            lignes_tr.append({
+                "Trace cherchée":
+                    f"paires anormales sur {tr['n_paires']} testées "
+                    f"(seuil ±{tr['seuil_z']:.1f} écarts-types)",
+                "p": "—",
+                "Conclusion": (
+                    f"{tr['n_paires_anormales']} paire(s) anormale(s)"
+                    if tr["n_paires_anormales"] else "aucune"
+                ),
+            })
+            tableau(pd.DataFrame(lignes_tr), hide_index=True)
+            st.caption(
+                "Ces tests ne voient que les truquages qui laissent une "
+                "empreinte dans les numéros publiés. Une manipulation qui "
+                "produit des résultats indiscernables du hasard est, par "
+                "construction, invisible dans une archive de résultats. "
+                "Les affaires de truquage connues (boules lestées, "
+                "générateur piraté) ont été découvertes par des témoins, "
+                "des enquêtes ou le comportement des gagnants, pas par les "
+                "statistiques des numéros."
+            )
+            if tr["n_paires_anormales"]:
+                with st.expander("Détail : paires les plus éloignées"):
+                    tableau(tr["top"], hide_index=True)
