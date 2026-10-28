@@ -4,15 +4,16 @@ import re
 import zipfile
 import itertools
 from collections import Counter
+from statistics import NormalDist
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
 import requests
-from urllib.parse import urlparse
 import streamlit as st
 
 INSTRUCTIONS_NEREON = """
-Tu es Néréon, le cerveau scientifique de MonIA.
+Tu es Néréon, le cerveau scientifique de l'AI.
 
 MISSION
 Tu analyses les archives historiques du Loto français et d’EuroMillions,
@@ -67,13 +68,13 @@ Si tu ne sais pas, dis-le.
 # --------------------------------------------------
 
 st.set_page_config(
-    page_title="MonIA — Laboratoire statistique",
+    page_title="Néréon — Laboratoire statistique",
     page_icon="🧠",
     layout="wide",
 )
 
 st.title("🧠 Néréon")
-st.subheader("Intelligence scientifique — Laboratoire MonIA")
+st.subheader("Intelligence scientifique — Laboratoire Néréon")
 st.caption(
     "Néréon — analyse les archives, teste les hypothèses "
     "et explique ses conclusions à partir des données."
@@ -249,6 +250,96 @@ def charger_archives_officielles(jeu):
     return tables_off, erreurs_off
 
 # --------------------------------------------------
+# Saisie manuelle des derniers tirages
+# --------------------------------------------------
+
+def analyser_saisie_tirages(texte, nb_num, max_num, nb_bonus, max_bonus):
+    """Lit les tirages saisis à la main : 'JJ/MM/AAAA : n1 n2 n3 n4 n5 | e1 e2'."""
+    lignes, alertes = [], []
+    attendu = nb_num + nb_bonus
+    for brut in (texte or "").splitlines():
+        ligne = brut.strip()
+        if not ligne:
+            continue
+        m = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})\s*[:;|\-–]?\s*(.*)", ligne)
+        if not m:
+            alertes.append(f"Ligne ignorée (date JJ/MM/AAAA attendue) : {ligne}")
+            continue
+        j, mo, an, reste = m.groups()
+        try:
+            date = pd.Timestamp(int(an), int(mo), int(j))
+        except ValueError:
+            alertes.append(f"Date invalide : {ligne}")
+            continue
+        entiers = [int(x) for x in re.findall(r"\d+", reste)]
+        if len(entiers) != attendu:
+            alertes.append(
+                f"{ligne} : {attendu} nombres attendus ({nb_num} numéros + "
+                f"{nb_bonus} bonus), {len(entiers)} trouvés. Tirage ignoré."
+            )
+            continue
+        nums, bonus = entiers[:nb_num], entiers[nb_num:]
+        if (len(set(nums)) != nb_num or len(set(bonus)) != nb_bonus
+                or not all(1 <= n <= max_num for n in nums)
+                or not all(1 <= b <= max_bonus for b in bonus)):
+            alertes.append(f"{ligne} : numéros hors règles ou en double. Tirage ignoré.")
+            continue
+        lignes.append({"date": date.strftime("%d/%m/%Y"),
+                       "numeros": sorted(nums), "bonus": sorted(bonus)})
+    return lignes, alertes
+
+
+def dates_souples(serie):
+    """Lit des dates JJ/MM/AAAA, AAAAMMJJ ou autres formats courants."""
+    brut = serie.astype(str).str.strip()
+    d = pd.to_datetime(brut, format="%d/%m/%Y", errors="coerce")
+    for fmt in ("%Y%m%d", None):
+        reste = d.isna()
+        if not reste.any():
+            break
+        d = d.fillna(pd.to_datetime(brut.where(reste), format=fmt,
+                                    dayfirst=True, errors="coerce"))
+    return d
+
+
+def fusionner_manuels(df, colonne_date, manuels, r):
+    """Ajoute les tirages saisis à la main à l'archive (sans doublon de date)."""
+    def colonnes(motif, nb, defaut):
+        trouvees = sorted(
+            (c for c in df.columns if re.fullmatch(motif, str(c).strip().lower())),
+            key=str,
+        )
+        return trouvees[:nb] if len(trouvees) >= nb else defaut
+
+    cols_n = colonnes(r"(boule|numero|num|n)_?\d", r["nb_num"],
+                      [f"boule_{i}" for i in range(1, r["nb_num"] + 1)])
+    defaut_b = (["numero_chance"] if r["nb_bonus"] == 1
+                else [f"etoile_{i}" for i in range(1, r["nb_bonus"] + 1)])
+    cols_b = colonnes(r"etoile_?\d|numero_?chance|chance", r["nb_bonus"], defaut_b)
+
+    col_date = colonne_date or "date_de_tirage"
+    deja = set()
+    if col_date in df.columns:
+        deja = set(dates_souples(df[col_date]).dropna().dt.strftime("%d/%m/%Y"))
+
+    lignes = []
+    for t in manuels:
+        if t["date"] in deja:
+            continue
+        deja.add(t["date"])
+        ligne = {col_date: t["date"]}
+        ligne.update(dict(zip(cols_n, t["numeros"])))
+        ligne.update(dict(zip(cols_b, t["bonus"])))
+        lignes.append(ligne)
+    if not lignes:
+        return df, colonne_date, 0
+
+    df = pd.concat([df, pd.DataFrame(lignes).astype(str)],
+                   ignore_index=True, sort=False)
+    df, colonne_date = trier_chronologiquement(df)
+    return df, colonne_date, len(lignes)
+
+# --------------------------------------------------
 # Barre latérale
 # --------------------------------------------------
 
@@ -276,6 +367,24 @@ with st.sidebar:
         "MonIA — outil d'analyse descriptive. Les résultats dépendent de la "
         "qualité, de la couverture et du format des archives."
     )
+
+    st.divider()
+    st.subheader("➕ Derniers tirages (saisie manuelle)")
+    saisie = st.text_area(
+        "Un tirage par ligne",
+        key=f"saisie_{jeu}",
+        height=140,
+        placeholder="27/10/2026 : 21 30 32 42 48 | 3 6",
+        help="Format : date, puis les numéros principaux, puis les étoiles / "
+             "numéro Chance. Ajoute une ligne à chaque nouveau tirage.",
+    )
+
+manuels, alertes_man = analyser_saisie_tirages(
+    saisie, REGLES[jeu]["nb_num"], REGLES[jeu]["max_num"],
+    REGLES[jeu]["nb_bonus"], REGLES[jeu]["max_bonus"],
+)
+for al in alertes_man:
+    st.warning(al)
 
 cle_num = f"colonnes_numeros_{jeu}"
 cle_bonus = f"colonnes_bonus_{jeu}"
@@ -419,6 +528,7 @@ def trier_chronologiquement(table):
 
 df = None
 colonne_date = None
+doublons = 0
 
 if tables:
     df = pd.concat(
@@ -430,6 +540,16 @@ if tables:
     df = df.drop_duplicates().reset_index(drop=True)
     doublons = lignes_avant - len(df)
     df, colonne_date = trier_chronologiquement(df)
+
+    if manuels:
+        df, colonne_date, nb_manuels = fusionner_manuels(
+            df, colonne_date, manuels, REGLES[jeu]
+        )
+        if nb_manuels:
+            st.info(
+                f"{nb_manuels} tirage(s) saisi(s) à la main ajouté(s) à "
+                "l'archive."
+            )
 
     st.success(
         f"{len(tables)} table(s) lue(s) · "
@@ -476,9 +596,7 @@ with onglets[0]:
         c3.metric("Lignes en double supprimées", doublons)
 
         if colonne_date:
-            dates_ok = pd.to_datetime(
-                df[colonne_date], dayfirst=True, errors="coerce"
-            ).dropna()
+            dates_ok = dates_souples(df[colonne_date]).dropna()
             if len(dates_ok):
                 st.write(
                     f"**Période couverte** : du "
@@ -773,7 +891,7 @@ with onglets[5]:
         )
 
 # --------------------------------------------------
-# Générateur de grilles Néréon (un seul générateur)
+# Générateur de grilles Néréon
 # --------------------------------------------------
 
 def matrice_tirages(df, colonnes, nb, maximum):
@@ -891,9 +1009,6 @@ def backtest(m, fenetre, poids, nb, tirages_test=300):
 # Équité de la machine : le tirage est-il vraiment aléatoire ?
 # --------------------------------------------------
 
-from statistics import NormalDist
-
-
 def p_normale(z):
     """p-valeur bilatérale d'un écart de z écarts-types."""
     return math.erfc(abs(float(z)) / math.sqrt(2))
@@ -929,17 +1044,7 @@ def test_uniformite(m, simulations=2000, graine=0):
 
 
 def parser_dates(serie):
-    brut = serie.astype(str).str.strip()
-    d = pd.to_datetime(brut, format="%d/%m/%Y", errors="coerce")
-    reste = d.isna()
-    if reste.any():
-        d = d.fillna(pd.to_datetime(brut.where(reste), format="%Y%m%d",
-                                    errors="coerce"))
-    reste = d.isna()
-    if reste.any():
-        d = d.fillna(pd.to_datetime(brut.where(reste), dayfirst=True,
-                                    errors="coerce"))
-    return d
+    return dates_souples(serie)
 
 
 def preparer_tirages(df, colonnes, nb, maximum):
@@ -1058,8 +1163,7 @@ def analyser_equite(m, nb, mx, ordre, jours, n_blocs=6):
                 "p": min(1.0, len(groupes) * min(g["p"] for g in groupes)),
             })
 
-    # 6. Ordre d'extraction (masse, rebond : certaines boules sortent-elles
-    #    plus tôt ?). Possible seulement si l'archive garde l'ordre.
+    # 6. Ordre d'extraction (possible seulement si l'archive garde l'ordre)
     position = None
     part_triee = None
     if ordre is not None and nb >= 2:
@@ -1091,8 +1195,7 @@ def analyser_equite(m, nb, mx, ordre, jours, n_blocs=6):
     S = float((d ** 2).sum())
     sigma2 = p0 * (1 - p0) / n_t
     lam = max(0.0, 1 - (mx - 3) * sigma2 / S) if S > 0 else 0.0
-    # Plusieurs tests à la fois : on multiplie par leur nombre (Bonferroni),
-    # sinon une fausse alerte devient bien plus fréquente que annoncé.
+    # Plusieurs tests à la fois : on multiplie par leur nombre (Bonferroni).
     p_min = min(1.0, len(tests) * min(t["p"] for t in tests))
     biais_frequences = min(1.0, len(tests) * min(p_glob, p_num)) < 0.01
     q_hat = p0 + lam * d if biais_frequences else np.full(mx, p0)
@@ -1111,8 +1214,7 @@ def analyser_equite(m, nb, mx, ordre, jours, n_blocs=6):
 def puissance_biais(n_t, nb, mx, sims=60, graine=1):
     """
     Si 5 boules avaient un poids (1 + δ) dans la machine (modèle de
-    Plackett-Luce : à chaque extraction, chance proportionnelle au poids),
-    nos tests le détecteraient-ils avec n_t tirages ?
+    Plackett-Luce), nos tests le détecteraient-ils avec n_t tirages ?
     """
     rng = np.random.default_rng(graine)
     p0 = nb / mx
@@ -1152,8 +1254,8 @@ def verdict_p(p):
 def analyser_truquage(m, nb, mx, graine=0):
     """
     Traces qu'un truquage maladroit laisserait dans les résultats publiés :
-    des fréquences trop régulières pour être honnêtes (résultats fabriqués
-    ou lissés) et des paires de numéros qui sortent ensemble anormalement.
+    des fréquences trop régulières pour être honnêtes et des paires de
+    numéros qui sortent ensemble anormalement.
     """
     n_t = m.shape[0]
     p0 = nb / mx
@@ -1302,8 +1404,9 @@ def grille_conforme(numeros, bornes, mx):
 with onglets[6]:
     st.header("🎯 Générateur autonome Néréon")
     st.caption(
-        "Néréon détecte les colonnes, analyse toute l'archive, teste chaque "
-        "méthode contre le hasard et décide seul de la stratégie."
+        "Néréon détecte les colonnes, analyse toute l'archive (y compris les "
+        "tirages saisis à la main), teste chaque méthode contre le hasard "
+        "et décide seul de la stratégie."
     )
 
     if df is None:
@@ -1358,6 +1461,14 @@ with onglets[6]:
                 )
 
             a = analyser(m_num, regle["nb_num"], regle["max_num"], fenetre)
+
+            # ---------- 0. Derniers tirages ----------
+            st.subheader("0. Derniers tirages pris en compte")
+            cols_aff = (
+                ([colonne_date] if colonne_date else [])
+                + list(cols_n) + list(cols_b)
+            )
+            tableau(df[cols_aff].tail(5).iloc[::-1], hide_index=True)
 
             # ---------- 1. Constat ----------
             st.subheader("1. Ce que Néréon a constaté")
@@ -1437,26 +1548,53 @@ with onglets[6]:
             poids = STRATEGIES[nom_strategie]
             freq, recent, retard = composantes(m_num, fenetre)
             p_stat = poids_statistiques(freq, recent, retard, poids)
-            p_num = melanger_avec_hasard(p_stat, alea)
-            eq_rapide = analyser_equite(
+
+            # Tous les tests des autres onglets
+            eq_num = analyser_equite(
                 m_num, regle["nb_num"], regle["max_num"], None, None
             )
-            if eq_rapide["biais_frequences"]:
-                q = eq_rapide["q_hat"]
+            tr = analyser_truquage(m_num, regle["nb_num"], regle["max_num"])
+
+            # (a) Écart de fréquence significatif
+            if eq_num["biais_frequences"]:
+                q = eq_num["q_hat"]
                 p_stat = q / q.sum()
                 if auto:
                     alea = 0.3
-                p_num = melanger_avec_hasard(p_stat, alea)
                 st.success(
                     "Le test d'équité (onglet 🔬) détecte un écart de "
                     "fréquence par rapport au hasard pur. Néréon pondère "
                     "les numéros avec l'écart estimé et corrigé du bruit."
                 )
+
+            # (b) Mémoire entre tirages (dernier tirage inclus)
+            memoire_active = False
+            test_mem = next((t for t in eq_num["tests"]
+                             if t["Test"] == "Mémoire entre tirages"), None)
+            if test_mem and test_mem["p"] < 0.01 and eq_num["z_lags"]:
+                lag, z_lag = max(eq_num["z_lags"], key=lambda x: abs(x[1]))
+                reference = m_num[-lag] > 0   # tirage qui précède de `lag` rangs
+                facteur = 1.5 if z_lag > 0 else 1 / 1.5
+                p_stat = p_stat * np.where(reference, facteur, 1.0)
+                p_stat = p_stat / p_stat.sum()
+                memoire_active = True
+
+            p_num = melanger_avec_hasard(p_stat, alea)
             rang_num = rang_normalise(p_stat) * 100
 
+            # (c) Bonus (étoiles / Chance) : mêmes tests
+            eq_b = None
             if m_bonus is not None:
                 fb, rb, tb = composantes(m_bonus, fenetre)
                 p_bonus_stat = poids_statistiques(fb, rb, tb, poids)
+                if len(m_bonus) >= 150:
+                    eq_b = analyser_equite(
+                        m_bonus, regle["nb_bonus"], regle["max_bonus"],
+                        None, None,
+                    )
+                    if eq_b["biais_frequences"]:
+                        qb = eq_b["q_hat"]
+                        p_bonus_stat = qb / qb.sum()
                 p_bonus = melanger_avec_hasard(p_bonus_stat, alea)
             else:
                 p_bonus = np.full(regle["max_bonus"], 1 / regle["max_bonus"])
@@ -1464,6 +1602,49 @@ with onglets[6]:
                     f"{regle['nom_bonus']} : colonnes non détectées, tirage "
                     "aléatoire."
                 )
+
+            st.write("**Synthèse de tous les onglets**")
+            tableau(pd.DataFrame([
+                {"Analyse": "Équité (test le plus sévère)",
+                 "Résultat": f"p = {eq_num['p_min']:.4f}",
+                 "Conclusion": verdict_p(eq_num["p_min"]),
+                 "Utilisé pour les grilles":
+                     "oui" if eq_num["biais_frequences"] else "non"},
+                {"Analyse": "Mémoire entre tirages",
+                 "Résultat": f"p = {test_mem['p']:.4f}" if test_mem else "—",
+                 "Conclusion":
+                     verdict_p(test_mem["p"]) if test_mem else "—",
+                 "Utilisé pour les grilles":
+                     "oui" if memoire_active else "non"},
+                {"Analyse": "Résultats trop réguliers (truquage)",
+                 "Résultat": f"p = {tr['p_regulier']:.4f}",
+                 "Conclusion": verdict_p(tr["p_regulier"]),
+                 "Utilisé pour les grilles": "non (information)"},
+                {"Analyse": "Paires anormales",
+                 "Résultat": f"{tr['n_paires_anormales']} sur {tr['n_paires']}",
+                 "Conclusion":
+                     "aucune" if not tr["n_paires_anormales"] else "à examiner",
+                 "Utilisé pour les grilles": "non (information)"},
+                {"Analyse": "Meilleure méthode du backtest",
+                 "Résultat":
+                     f"{meilleure} ({brutes[meilleure]['z']:+.2f})"
+                     if brutes else "—",
+                 "Conclusion":
+                     "bat le hasard" if avantage else "ne bat pas le hasard",
+                 "Utilisé pour les grilles":
+                     "oui" if avantage else "non (hasard dominant)"},
+                {"Analyse": regle["nom_bonus"],
+                 "Résultat": f"p = {eq_b['p_min']:.4f}" if eq_b else "—",
+                 "Conclusion":
+                     verdict_p(eq_b["p_min"]) if eq_b else "non testé",
+                 "Utilisé pour les grilles":
+                     "oui" if (eq_b and eq_b["biais_frequences"]) else "non"},
+                {"Analyse": "Schémas (parité, somme, étendue…)",
+                 "Résultat": "filtre sur les grilles",
+                 "Conclusion": "—",
+                 "Utilisé pour les grilles":
+                     "oui" if filtre_schemas else "non"},
+            ]), hide_index=True)
 
             # ---------- 3. Grilles ----------
             st.subheader("3. Grilles proposées")
@@ -1696,7 +1877,7 @@ with onglets[7]:
                     df, cols_b, regle["nb_bonus"], regle["max_bonus"]
                 )
                 if m_bon is not None and len(m_bon) >= 150:
-                    eq_b = analyser_equite(
+                    eq_bonus = analyser_equite(
                         m_bon, regle["nb_bonus"], regle["max_bonus"],
                         None, None,
                     )
@@ -1707,7 +1888,7 @@ with onglets[7]:
                                 "p-valeur corrigée": round(t["p"], 4),
                                 "Conclusion": verdict_p(t["p"]),
                             }
-                            for t in eq_b["tests"]
+                            for t in eq_bonus["tests"]
                         ]), hide_index=True)
 
             # ---------- Puissance ----------
@@ -1782,15 +1963,15 @@ with onglets[7]:
 
             # ---------- Hypothèse « truqué » ----------
             st.subheader("Et si c'était truqué ?")
-            tr = analyser_truquage(m_eq, nb_eq, mx_eq)
+            tr_eq = analyser_truquage(m_eq, nb_eq, mx_eq)
             memoire = next(
                 (t["p"] for t in eq["tests"]
                  if t["Test"] == "Mémoire entre tirages"), None
             )
             lignes_tr = [{
                 "Trace cherchée": "résultats trop réguliers pour du hasard",
-                "p": round(tr["p_regulier"], 4),
-                "Conclusion": verdict_p(tr["p_regulier"]),
+                "p": round(tr_eq["p_regulier"], 4),
+                "Conclusion": verdict_p(tr_eq["p_regulier"]),
             }]
             if memoire is not None:
                 lignes_tr.append({
@@ -1802,12 +1983,12 @@ with onglets[7]:
                 })
             lignes_tr.append({
                 "Trace cherchée":
-                    f"paires anormales sur {tr['n_paires']} testées "
-                    f"(seuil ±{tr['seuil_z']:.1f} écarts-types)",
+                    f"paires anormales sur {tr_eq['n_paires']} testées "
+                    f"(seuil ±{tr_eq['seuil_z']:.1f} écarts-types)",
                 "p": "—",
                 "Conclusion": (
-                    f"{tr['n_paires_anormales']} paire(s) anormale(s)"
-                    if tr["n_paires_anormales"] else "aucune"
+                    f"{tr_eq['n_paires_anormales']} paire(s) anormale(s)"
+                    if tr_eq["n_paires_anormales"] else "aucune"
                 ),
             })
             tableau(pd.DataFrame(lignes_tr), hide_index=True)
@@ -1821,6 +2002,6 @@ with onglets[7]:
                 "des enquêtes ou le comportement des gagnants, pas par les "
                 "statistiques des numéros."
             )
-            if tr["n_paires_anormales"]:
+            if tr_eq["n_paires_anormales"]:
                 with st.expander("Détail : paires les plus éloignées"):
-                    tableau(tr["top"], hide_index=True)
+                    tableau(tr_eq["top"], hide_index=True)
